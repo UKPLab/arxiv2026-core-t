@@ -1,0 +1,23 @@
+# Large run artifacts / datasets (not tracked)
+data/
+cache/
+sql_database/
+results/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Secrets / local config
+.env
+
+# OS / editor
+.DS_Store
+
