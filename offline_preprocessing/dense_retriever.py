@@ -7,13 +7,20 @@ Inputs:
 
 Outputs:
   - FAISS index cached at `cache/{dataset}/faiss_index/`.
-  - Per-run results at `results/results_dense_retriever/{llm}_{embed}_{reranker}/` with:
+  - Per-run results at `results/{dataset}/{llm}_{embed}/results_dense_retriever/` with:
       - `{dataset}_k_{top_k}.json` (final outputs)
       - `partials/` for per-sample incremental saves
 
 Usage:
-    python offline_preprocessing/dense_retriever.py --database-type bird --top-k 10 --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1"
+    python offline_preprocessing/dense_retriever.py --dataset bird --top-k 10 --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1"
 """
+
+import os
+
+# macOS: prevent abort caused by multiple OpenMP runtimes (e.g., faiss + torch/sklearn).
+# This is a pragmatic runtime workaround; the "clean" fix is ensuring only one OpenMP
+# runtime is linked across all native deps.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
 import json
@@ -46,7 +53,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-from utils import DatabaseType, create_embeddings, create_reranker
+from utils import DatabaseType, create_embeddings, create_reranker, make_run_tag
 
 
 def _require_faiss() -> None:
@@ -156,8 +163,8 @@ def _sanitize_for_filename(name: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in name)
 
 
-def _get_index_paths(project_root: Path, dataset: str, embedding_model: str) -> Tuple[Path, Path]:
-    index_dir = project_root / "cache" / dataset / "faiss_index"
+def _get_index_paths(project_root: Path, dataset: str, run_tag: str, embedding_model: str) -> Tuple[Path, Path]:
+    index_dir = project_root / "cache" / dataset / run_tag / "faiss_index"
     index_dir.mkdir(parents=True, exist_ok=True)
     model_tag = _sanitize_for_filename(embedding_model or "unknown")
     index_path = index_dir / f"index_{model_tag}.faiss"
@@ -226,10 +233,19 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         description="Build or reuse a FAISS index and retrieve top tables for each question."
     )
     parser.add_argument(
-        "--database-type",
+        "--dataset",
+        dest="dataset",
         choices=[dt.value for dt in DatabaseType],
         default=DatabaseType.BIRD.value,
         help="Dataset to operate on.",
+    )
+    # Backward-compatible alias.
+    parser.add_argument(
+        "--database-type",
+        dest="dataset",
+        choices=[dt.value for dt in DatabaseType],
+        default=DatabaseType.BIRD.value,
+        help="(deprecated) Same as --dataset.",
     )
     parser.add_argument(
         "--embedding-model",
@@ -261,7 +277,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--save-scores",
         action="store_true",
         dest="save_scores",
-        default=False,
+        default=True,
         help="Persist similarity/rerank scores alongside table IDs.",
     )
     parser.add_argument(
@@ -274,21 +290,29 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def _make_run_dir(
-    *, project_root: Path, llm_model: str, embedding_model: str, use_reranker: bool, reranker_model: str
+    *,
+    project_root: Path,
+    dataset: str,
+    llm_model: str,
+    embedding_model: str,
+    use_reranker: bool,
+    reranker_model: str,
 ) -> Path:
     llm_tag = _sanitize_for_filename(llm_model)
     embed_tag = _sanitize_for_filename(embedding_model)
-    rerank_tag = _sanitize_for_filename(reranker_model) if use_reranker and reranker_model else ""
-    run_tag = f"{llm_tag}_{embed_tag}" + (f"_{rerank_tag}" if rerank_tag else "")
+    # Results run folder is strictly `{llm}_{embedding_model}` (no reranker in the folder name).
+    run_tag = f"{llm_tag}_{embed_tag}"
 
-    out_dir = project_root / "results" / "results_dense_retriever" / run_tag
+    # Results layout: results/<dataset>/{llm}_{embedding_model}/results_dense_retriever/
+    out_dir = project_root / "results" / str(dataset) / run_tag / "results_dense_retriever"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "partials").mkdir(parents=True, exist_ok=True)
     return out_dir
 
 
-def _partial_path(partials_dir: Path, dataset: str, top_k: int, sample_idx: int) -> Path:
-    return partials_dir / f"{dataset}_k_{top_k}_{sample_idx}.json"
+def _partial_path(partials_dir: Path, dataset: str, top_k: int, sample_idx: int, *, with_scores: bool = False) -> Path:
+    suffix = "_with_scores" if with_scores else ""
+    return partials_dir / f"{dataset}_k_{top_k}{suffix}_{sample_idx}.json"
 
 
 def _faiss_candidates(
@@ -356,7 +380,7 @@ def run_dense_retrieval(args: argparse.Namespace) -> Path:
     """Run dense retrieval for the configured dataset, returning the output path."""
     _require_faiss()
 
-    dataset = args.database_type
+    dataset = args.dataset
     top_k = args.top_k
     use_reranker = args.use_reranker
     save_scores = args.save_scores
@@ -366,11 +390,12 @@ def run_dense_retrieval(args: argparse.Namespace) -> Path:
     top_k_initial = max(args.top_k_initial, top_k, (top_k_final if use_reranker else 0))
 
     project_root = _project_root()
+    cache_run_tag = make_run_tag(llm_model=str(args.llm_model), embedding_model=str(args.embedding_model))
 
     data_dir = project_root / "data" / dataset
     dev_path = data_dir / "dev.json"
     dev_tables_path = data_dir / "dev_tables.json"
-    enriched_dir = project_root / "cache" / dataset / "metadata" / "enriched_tables"
+    enriched_dir = project_root / "cache" / dataset / cache_run_tag / "metadata" / "enriched_tables"
 
     if not dev_path.exists():
         raise FileNotFoundError(f"Missing dev.json at {dev_path}")
@@ -389,7 +414,7 @@ def run_dense_retrieval(args: argparse.Namespace) -> Path:
         raise RuntimeError("No enriched tables were prepared. Aborting.")
 
     # Load or build FAISS index
-    index_path, meta_path = _get_index_paths(project_root, dataset, args.embedding_model or "")
+    index_path, meta_path = _get_index_paths(project_root, dataset, cache_run_tag, args.embedding_model or "")
     index = _load_or_build_index(
         table_texts=table_texts,
         table_keys=table_keys,
@@ -410,8 +435,10 @@ def run_dense_retrieval(args: argparse.Namespace) -> Path:
             print(f"Warning: failed to initialize reranker, falling back to FAISS-only: {e}")
             reranker = None
 
+    # Results can include reranker tag, but the cache run tag is always `{llm}_{embedding_model}`.
     out_dir = _make_run_dir(
         project_root=project_root,
+        dataset=dataset,
         llm_model=args.llm_model,
         embedding_model=args.embedding_model,
         use_reranker=(reranker is not None),
@@ -421,13 +448,22 @@ def run_dense_retrieval(args: argparse.Namespace) -> Path:
 
     print(f"Retrieving top-{top_k} tables for {len(dev_samples)} questions...")
     for i, sample in enumerate(tqdm(dev_samples)):
-        partial_file = _partial_path(partials_dir, dataset, top_k, i)
-        if partial_file.exists():
+        partial_plain = _partial_path(partials_dir, dataset, top_k, i, with_scores=False)
+        partial_scored = _partial_path(partials_dir, dataset, top_k, i, with_scores=True)
+        if save_scores:
+            # Already computed both; skip to enable resume
+            if partial_plain.exists() and partial_scored.exists():
+                continue
+        else:
             # Already computed; skip to enable resume
-            continue
+            if partial_plain.exists():
+                continue
+
         q = (sample.get("question") or "").strip() if isinstance(sample, dict) else ""
         if not q:
-            _write_json(partial_file, [])
+            _write_json(partial_plain, [])
+            if save_scores:
+                _write_json(partial_scored, [])
             continue
         q_text = _format_query_text(q)
         q_vec = np.array(embeddings.embed_query(q_text), dtype=np.float32)
@@ -452,24 +488,55 @@ def run_dense_retrieval(args: argparse.Namespace) -> Path:
             top_k_final=top_k_final,
             save_scores=save_scores,
         )
-        _write_json(partial_file, top_items)
+        if save_scores:
+            # When save_scores is enabled, always write BOTH:
+            # - plain list[str] to `{dataset}_k_{top_k}*.json`
+            # - list[dict] (with scores) to `{dataset}_k_{top_k}_with_scores*.json`
+            scored_items = top_items if isinstance(top_items, list) else []
+            plain_items: List[str] = []
+            for item in scored_items:
+                if isinstance(item, dict) and isinstance(item.get("table"), str):
+                    plain_items.append(item["table"])
+            _write_json(partial_plain, plain_items)
+            _write_json(partial_scored, scored_items)
+        else:
+            _write_json(partial_plain, top_items)
 
     # Consolidate all per-sample results into the final output
-    out_path = out_dir / f"{dataset}_k_{top_k}.json"
-    final_results: List[Any] = []
-    for i in range(len(dev_samples)):
-        pf = _partial_path(partials_dir, dataset, top_k, i)
-        entry = []
-        if pf.exists():
-            try:
-                entry = _read_json(pf)
-            except Exception:
-                entry = []
-        final_results.append(entry if isinstance(entry, list) else [])
+    out_path_plain = out_dir / f"{dataset}_k_{top_k}.json"
+    out_path_scored = out_dir / f"{dataset}_k_{top_k}_with_scores.json"
 
-    _write_json(out_path, final_results)
-    print(f"Wrote results to: {out_path}")
-    return out_path
+    final_plain: List[Any] = []
+    final_scored: List[Any] = []
+
+    for i in range(len(dev_samples)):
+        pf_plain = _partial_path(partials_dir, dataset, top_k, i, with_scores=False)
+        entry_plain: Any = []
+        if pf_plain.exists():
+            try:
+                entry_plain = _read_json(pf_plain)
+            except Exception:
+                entry_plain = []
+        final_plain.append(entry_plain if isinstance(entry_plain, list) else [])
+
+        if save_scores:
+            pf_scored = _partial_path(partials_dir, dataset, top_k, i, with_scores=True)
+            entry_scored: Any = []
+            if pf_scored.exists():
+                try:
+                    entry_scored = _read_json(pf_scored)
+                except Exception:
+                    entry_scored = []
+            final_scored.append(entry_scored if isinstance(entry_scored, list) else [])
+
+    _write_json(out_path_plain, final_plain)
+    print(f"Wrote results to: {out_path_plain}")
+    if save_scores:
+        _write_json(out_path_scored, final_scored)
+        print(f"Wrote results to: {out_path_scored}")
+        return out_path_scored
+
+    return out_path_plain
 
 
 if __name__ == "__main__":

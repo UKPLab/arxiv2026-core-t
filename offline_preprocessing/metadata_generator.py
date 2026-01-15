@@ -11,7 +11,7 @@ Outputs:
   - Cached metadata under `cache/{dataset}/metadata/`
 
 Usage:
-  python offline_preprocessing/metadata_generator.py --database-type bird --batch-size 20 --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo"
+  python offline_preprocessing/metadata_generator.py --dataset bird --batch-size 20 --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo"
 """
 
 import argparse
@@ -184,21 +184,20 @@ class MetadataGenerator:
         *,
         database_type: DatabaseType,
         llm_model: Optional[str] = None,
+        embedding_model: Optional[str] = None,
         storage_manager: Optional[UnifiedStorageManager] = None,
         generate_purpose: bool = True,
         generate_summary: bool = True,
         generate_qa: bool = True,
     ) -> None:
         self.database_type = database_type
-        self.storage = storage_manager or get_unified_storage_manager(database_type=database_type.value)
-
-        # Ensure storage manager points at `<root>/cache/<dataset>/...`
-        cache_root = PROJECT_ROOT / "cache" / database_type.value
-        self.storage.cache_dir = cache_root
-        self.storage.preprocessed_cache_dir = cache_root / "preprocessed_tables"
-        self.storage.preprocessed_cache_dir.mkdir(parents=True, exist_ok=True)
-
-        self.config = Configuration(database_type=database_type, llm_model=llm_model) if llm_model else Configuration(database_type=database_type)
+        self.config = Configuration(
+            database_type=database_type,
+            llm_model=str(llm_model) if llm_model else "openai:gpt-4o-mini",
+            embedding_model=str(embedding_model) if embedding_model else "fireworks:WhereIsAI/UAE-Large-V1",
+        )
+        # New cache layout is handled by UnifiedStorageManager when cache_dir="cache".
+        self.storage = storage_manager or UnifiedStorageManager(config=self.config, cache_dir="cache")
         self.cache = get_metadata_cache(self.config.get_database_cache_dir("metadata"))
         self.generate_purpose = bool(generate_purpose)
         self.generate_summary = bool(generate_summary)
@@ -373,10 +372,19 @@ class MetadataGenerator:
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate and cache metadata for preprocessed tables.")
     parser.add_argument(
-        "--database-type",
+        "--dataset",
+        dest="dataset",
         choices=[dt.value for dt in DatabaseType],
         default=DatabaseType.BIRD.value,
         help="Dataset to operate on.",
+    )
+    # Backward-compatible alias.
+    parser.add_argument(
+        "--database-type",
+        dest="dataset",
+        choices=[dt.value for dt in DatabaseType],
+        default=DatabaseType.BIRD.value,
+        help="(deprecated) Same as --dataset.",
     )
     parser.add_argument("--batch-size", type=int, default=20, help="Number of tables per batch.")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of tables to process (for quick tests).")
@@ -387,6 +395,12 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Optional path to a file listing table identifiers (one per line). If omitted, uses dev_tables.json.",
     )
     parser.add_argument("--llm-model", type=str, default=None, help="Override the LLM model used for metadata generation.")
+    parser.add_argument(
+        "--embedding-model",
+        type=str,
+        default="fireworks:WhereIsAI/UAE-Large-V1",
+        help="Embedding model tag used for cache run folder naming.",
+    )
     parser.add_argument("--dry-run", action="store_true", default=False, help="Load inputs only; do not call the LLM.")
     parser.add_argument(
         "--purpose",
@@ -436,7 +450,7 @@ def _print_summary(results: Dict[str, Any]) -> None:
 
 
 def main(args: argparse.Namespace) -> int:
-    database_type = DatabaseType(args.database_type)
+    database_type = DatabaseType(args.dataset)
     table_ids = _load_table_identifiers(database_type, args.tables_file)
     if args.limit is not None:
         table_ids = table_ids[: args.limit]
@@ -448,6 +462,7 @@ def main(args: argparse.Namespace) -> int:
     generator = MetadataGenerator(
         database_type=database_type,
         llm_model=args.llm_model,
+        embedding_model=args.embedding_model,
         generate_purpose=args.purpose,
         generate_summary=args.summary,
         generate_qa=args.qa,

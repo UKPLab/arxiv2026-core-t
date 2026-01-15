@@ -11,7 +11,7 @@ Outputs:
   - Optional column value hints if `--cache-column-hints` is set
 
 Usage:
-  python table_preprocessor.py --database-type bird --batch-size 50 --cache-column-hints
+  python offline_preprocessing/table_preprocessor.py --dataset bird --batch-size 50
 """
 
 import argparse
@@ -50,16 +50,17 @@ SAMPLE_ROWS = 5
 class TablePreprocessor:
     """Offline preprocessing of database tables with simple caching."""
 
-    def __init__(self, database_type: DatabaseType, storage_manager: Optional[UnifiedStorageManager] = None):
+    def __init__(
+        self,
+        database_type: DatabaseType,
+        *,
+        config: Optional[Configuration] = None,
+        storage_manager: Optional[UnifiedStorageManager] = None,
+    ):
         self.database_type = database_type
-        if storage_manager is not None:
-            self.preprocessed_cache = storage_manager
-        else:
-            cache_root = PROJECT_ROOT / "cache" / database_type.value
-            self.preprocessed_cache = get_unified_storage_manager(database_type=database_type.value)
-            self.preprocessed_cache.cache_dir = cache_root
-            self.preprocessed_cache.preprocessed_cache_dir = cache_root / "preprocessed_tables"
-            self.preprocessed_cache.preprocessed_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.config = config or Configuration(database_type=database_type)
+        # New cache layout is handled by UnifiedStorageManager when cache_dir="cache".
+        self.preprocessed_cache = storage_manager or UnifiedStorageManager(config=self.config, cache_dir="cache")
 
     def preprocess_single_table(self, table_identifier: str) -> Dict[str, Any]:
         parsed = _parse_table_identifier(table_identifier)
@@ -192,10 +193,26 @@ class TablePreprocessor:
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Preprocess tables and cache markdown representations.")
     parser.add_argument(
-        "--database-type",
+        "--dataset",
+        dest="dataset",
         choices=[dt.value for dt in DatabaseType],
         default=DatabaseType.BIRD.value,
         help="Dataset to operate on.",
+    )
+    # Backward-compatible alias.
+    parser.add_argument(
+        "--database-type",
+        dest="dataset",
+        choices=[dt.value for dt in DatabaseType],
+        default=DatabaseType.BIRD.value,
+        help="(deprecated) Same as --dataset.",
+    )
+    parser.add_argument("--llm-model", type=str, default="openai:gpt-4o-mini", help="LLM tag used for cache run folder naming.")
+    parser.add_argument(
+        "--embedding-model",
+        type=str,
+        default="fireworks:WhereIsAI/UAE-Large-V1",
+        help="Embedding model tag used for cache run folder naming.",
     )
     parser.add_argument("--batch-size", type=int, default=50, help="Number of tables per batch.")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of tables to process (for quick tests).")
@@ -311,7 +328,7 @@ def _load_table_identifiers(database_type: DatabaseType, tables_file: Optional[s
 
 
 def main(args: argparse.Namespace) -> int:
-    database_type = DatabaseType(args.database_type)
+    database_type = DatabaseType(args.dataset)
 
     table_ids = _load_table_identifiers(database_type, args.tables_file)
     if args.limit is not None:
@@ -321,7 +338,12 @@ def main(args: argparse.Namespace) -> int:
         print("No table identifiers found. Exiting.")
         return 1
 
-    preprocessor = TablePreprocessor(database_type=database_type)
+    config = Configuration(
+        database_type=database_type,
+        llm_model=str(args.llm_model),
+        embedding_model=str(args.embedding_model),
+    )
+    preprocessor = TablePreprocessor(database_type=database_type, config=config)
     results = preprocessor.process_all_tables(table_ids, batch_size=args.batch_size)
 
     if args.cache_column_hints:

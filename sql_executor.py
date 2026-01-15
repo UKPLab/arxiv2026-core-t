@@ -2,22 +2,11 @@
 """
 SQL executor.
 
-This script takes the outputs of `sql_generator.py`:
-  - sqls.json        (list[str|null])
-  - sqls_details.json (list[dict])
-
-and executes each SQL against the referenced SQLite tables. It does NOT perform
+This script takes the outputs of `sql_generator.py` and executes each SQL against the referenced SQLite tables. It does NOT perform
 any evaluation/scoring; it only runs the query and records execution outcomes.
 
-Example:
-python sql_executor.py \
-  --sqls results/results_sql_generation/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/sqls.json \
-  --sqls-details results/results_sql_generation/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/sqls_details.json \
-  --database-type bird \
-  --row-limit 300000 \
-  --timeout-seconds 60 \
-  --out results/results_sql_execution/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/sqls_exec.json \
-  --out-details results/results_sql_execution/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/sqls_exec_details.json
+Usage:
+    python sql_executor.py --dataset bird --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1"
 """
 
 from __future__ import annotations
@@ -53,7 +42,7 @@ try:
 except Exception:
     pass
 
-from utils import Configuration, DatabaseType  # noqa: E402
+from utils import Configuration, DatabaseType, get_results_run_dir  # noqa: E402
 from utils.db_connector import execute_sql_on_attached_tables  # noqa: E402
 
 
@@ -131,13 +120,39 @@ def _execute_one(
 
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Execute generated SQLs (no evaluation).")
-    p.add_argument("--sqls", type=str, required=True, help="Path to sqls.json from sql_generator.py (list[str|null]).")
-    p.add_argument("--sqls-details", type=str, required=True, help="Path to sqls_details.json from sql_generator.py.")
     p.add_argument(
-        "--database-type",
+        "--sqls",
+        type=str,
+        default=None,
+        help="Path to sqls.json from sql_generator.py (defaults to results/<dataset>/{llm}_{embedding_model}/results_sql_generation/sqls.json).",
+    )
+    p.add_argument(
+        "--sqls-details",
+        type=str,
+        default=None,
+        help="Path to sqls_details.json from sql_generator.py (defaults to results/<dataset>/{llm}_{embedding_model}/results_sql_generation/sqls_details.json).",
+    )
+    p.add_argument(
+        "--dataset",
+        dest="dataset",
         choices=[dt.value for dt in DatabaseType],
         default=DatabaseType.BIRD.value,
-        help="Dataset type used for DB path resolution.",
+        help="Dataset used for DB path resolution and results path resolution.",
+    )
+    # Backward-compatible alias.
+    p.add_argument(
+        "--database-type",
+        dest="dataset",
+        choices=[dt.value for dt in DatabaseType],
+        default=DatabaseType.BIRD.value,
+        help="(deprecated) Same as --dataset.",
+    )
+    p.add_argument("--llm-model", type=str, default="openai:gpt-4o-mini", help="LLM tag used for results run folder naming.")
+    p.add_argument(
+        "--embedding-model",
+        type=str,
+        default="fireworks:WhereIsAI/UAE-Large-V1",
+        help="Embedding model tag used for results run folder naming.",
     )
     p.add_argument(
         "--optimize-sql",
@@ -160,15 +175,32 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--start", type=int, default=0, help="Start index (default: 0).")
     p.add_argument("--limit", type=int, default=None, help="Optional number of items to process.")
     p.add_argument("--no-rows", action="store_true", default=False, help="Do not store rows in outputs (summary only).")
-    p.add_argument("--out", type=str, required=True, help="Output JSON path (list[dict] summary per question).")
-    p.add_argument("--out-details", type=str, required=True, help="Output JSON path (list[dict] with extra fields).")
+    p.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help="Output JSON path (defaults to results/<dataset>/{llm}_{embedding_model}/results_sql_generation/sqls_exec.json).",
+    )
+    p.add_argument(
+        "--out-details",
+        type=str,
+        default=None,
+        help="Output JSON path (defaults to results/<dataset>/{llm}_{embedding_model}/results_sql_generation/sqls_exec_details.json).",
+    )
     p.add_argument("--indent", type=int, default=2, help="JSON indentation level.")
     return p.parse_args(argv)
 
 
 def main(args: argparse.Namespace) -> int:
-    sqls_path = Path(args.sqls).expanduser().resolve()
-    details_path = Path(args.sqls_details).expanduser().resolve()
+    gen_dir = get_results_run_dir(
+        dataset=str(args.dataset),
+        step_dirname="results_sql_generation",
+        llm_model=str(args.llm_model),
+        embedding_model=str(args.embedding_model),
+        project_root=PROJECT_ROOT,
+    )
+    sqls_path = Path(args.sqls).expanduser().resolve() if args.sqls else (gen_dir / "sqls.json").resolve()
+    details_path = Path(args.sqls_details).expanduser().resolve() if args.sqls_details else (gen_dir / "sqls_details.json").resolve()
     if not sqls_path.exists():
         print(f"❌ sqls file not found: {sqls_path}")
         return 1
@@ -198,9 +230,14 @@ def main(args: argparse.Namespace) -> int:
         print(f"Nothing to do: start={start} end={end} (available={n})")
         return 0
 
-    dataset = DatabaseType(args.database_type)
-    # llm_model is irrelevant for execution; it is used by Configuration only as a label.
-    config = Configuration(database_type=dataset, llm_model="offline_sql_executor", temperature=0.0)
+    dataset = DatabaseType(args.dataset)
+    # llm_model/embedding_model are used for run folder naming + any downstream path helpers.
+    config = Configuration(
+        database_type=dataset,
+        llm_model=str(args.llm_model),
+        embedding_model=str(args.embedding_model),
+        temperature=0.0,
+    )
 
     row_limit: Optional[int]
     if args.row_limit is None:
@@ -306,8 +343,11 @@ def main(args: argparse.Namespace) -> int:
             f"rows={row_count} -> {'OK' if ok else 'FAIL'}"
         )
 
-    out_path = Path(args.out).expanduser().resolve()
-    out_details_path = Path(args.out_details).expanduser().resolve()
+    # Write executor outputs alongside sql generation outputs (same run folder).
+    out_path = Path(args.out).expanduser().resolve() if args.out else (gen_dir / "sqls_exec.json").resolve()
+    out_details_path = (
+        Path(args.out_details).expanduser().resolve() if args.out_details else (gen_dir / "sqls_exec_details.json").resolve()
+    )
     _write_json(out_path, out_summary, indent=int(args.indent))
     _write_json(out_details_path, out_details, indent=int(args.indent))
     print(f"Wrote execution summary: {out_path}")

@@ -3,36 +3,11 @@
 Table selector.
 
 This script reads dense-retriever outputs (top-K tables per query), then uses an
-LLM to choose a coherent subset of tables per query.
+LLM to choose a coherent subset of tables per query. Augmentation is enabled by default, 
+it applies the additive adjustment step to the selected tables.
 
-Inputs:
-  - `--data`: JSON list[list[str]] of retrieved table ids per query (e.g. "db#sep#table")
-  - `--queries-file` (optional): defaults to `data/<dataset>/dev.json`
-  - `--enriched-tables`: directory with one enriched table JSON per table id
-  - `--similarities`: directory with pairwise compatibility JSON files
-  - `--retrieved-scores` (optional): JSON list[list[{"table","similarity_score"}]] aligned with `--data`
-
-Outputs:
-  - `--out`: JSON list[list[str]] of selected table ids per query
-  - `--out-details` (optional): JSON list[dict] with extra per-query info
-
-Example:
-python table_selector.py \
-  --data results/results_dense_retriever/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/bird_k_10.json \
-  --enriched-tables cache/bird/metadata/enriched_tables \
-  --similarities cache/bird/compatibility \
-  --retrieved-scores results/results_dense_retriever/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/bird_k_10_with_scores.json \
-  --database-type bird \
-  --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo" \
-  --temperature 0.0 \
-  --threshold 0.3 \
-  --augment-with-compatible-tables \
-  --num-samples 1534 \
-  --out results/results_table_selection/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/selected_tables.json \
-  --out-details results/results_table_selection/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/selected_tables_details.json
-
-Augmentation:
-  - If `--augment-with-compatible-tables` is enabled, it applies the additive adjustment step to the selected tables.
+Usage:
+    python table_selector.py --dataset bird --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1" --partition 0 --num-partitions 2
 """
 
 from __future__ import annotations
@@ -60,7 +35,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-from utils import Configuration, DatabaseType
+from utils import Configuration, DatabaseType, get_results_run_dir
 from utils.cache_scripts.selection_cache import get_selection_cache
 from utils.prompts import get_selection_prompt_lrm_few_shot
 
@@ -815,40 +790,72 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         )
     )
 
-    p.add_argument("--data", type=str, required=True, help="Path to dense-retriever output JSON (list[list[str]]).")
+    p.add_argument(
+        "--data",
+        type=str,
+        default=None,
+        help="Path to dense-retriever output JSON (defaults to results/<dataset>/{llm}_{embedding_model}/results_dense_retriever/<dataset>_k_<top_k>.json).",
+    )
     p.add_argument(
         "--queries-file",
         type=str,
         default=None,
-        help="Path to queries JSON (defaults to data/<database-type>/dev.json).",
+        help="Path to queries JSON (defaults to data/<dataset>/dev.json).",
     )
     p.add_argument(
         "--enriched-tables",
         type=str,
-        required=True,
-        help="Path to enriched tables cache directory (e.g., cache/bird/metadata/enriched_tables).",
+        required=False,
+        default=None,
+        help="Path to enriched tables cache directory (defaults to cache/<dataset>/{llm}_{embedding_model}/metadata/enriched_tables).",
     )
     p.add_argument(
         "--similarities",
         type=str,
-        required=True,
-        help="Path to compatibility cache directory (e.g., cache/bird/compatibility).",
+        required=False,
+        default=None,
+        help="Path to compatibility cache directory (defaults to cache/<dataset>/{llm}_{embedding_model}/compatibility).",
     )
     p.add_argument(
         "--retrieved-scores",
         type=str,
         default=None,
-        help="Path to per-query retrieved-table scores JSON (list[list[{table, similarity_score}]]).",
+        help=(
+            "Optional path to per-query retrieved-table scores JSON (list[list[{table, similarity_score}]]). "
+            "Defaults to results/<dataset>/{llm}_{embedding_model}/results_dense_retriever/<dataset>_k_<top_k>_with_scores.json "
+            "when omitted. If omitted and --data contains dict entries, those are used as scores automatically."
+        ),
     )
 
     p.add_argument(
-        "--database-type",
+        "--dataset",
+        dest="dataset",
         choices=[dt.value for dt in DatabaseType],
         default=DatabaseType.BIRD.value,
-        help="Dataset type used for cache directory resolution.",
+        help="Dataset used for cache/results path resolution.",
+    )
+    # Backward-compatible alias.
+    p.add_argument(
+        "--database-type",
+        dest="dataset",
+        choices=[dt.value for dt in DatabaseType],
+        default=DatabaseType.BIRD.value,
+        help="(deprecated) Same as --dataset.",
     )
     p.add_argument("--llm-model", type=str, default="openai:gpt-4o-mini", help="LLM id for LangChain init_chat_model.")
+    p.add_argument(
+        "--embedding-model",
+        type=str,
+        default="fireworks:WhereIsAI/UAE-Large-V1",
+        help="Embedding model tag used for cache/results run folder naming.",
+    )
     p.add_argument("--temperature", type=float, default=0.0, help="LLM temperature.")
+    p.add_argument(
+        "--top-k",
+        type=int,
+        default=10,
+        help="Only used to derive default --data path when --data is omitted (default: 10).",
+    )
 
     p.add_argument(
         "--threshold",
@@ -859,13 +866,28 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--augment-with-compatible-tables",
         action="store_true",
-        default=False,
+        default=True,
         help="Apply augmentation after selection.",
     )
     p.add_argument("--no-cache", action="store_true", default=False, help="Disable reading/writing selection cache.")
 
     p.add_argument("--start", type=int, default=0, help="Start index in the dataset (default: 0).")
     p.add_argument("--limit", type=int, default=None, help="Optional limit on number of queries to process.")
+    p.add_argument(
+        "--partition",
+        type=int,
+        default=None,
+        help=(
+            "Optional partition index (0-based) for contiguous partitioning. "
+            "Use together with --num-partitions."
+        ),
+    )
+    p.add_argument(
+        "--num-partitions",
+        type=int,
+        default=None,
+        help="Optional number of contiguous partitions. Use together with --partition.",
+    )
     p.add_argument(
         "--num-samples",
         type=int,
@@ -882,9 +904,52 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=None,
         help="Optional path to write a verbose per-query output (debug/details).",
     )
-    p.add_argument("--out", type=str, required=True, help="Output JSON path.")
+    p.add_argument(
+        "--write-details",
+        action="store_true",
+        default=True,
+        help="If set, write details to the default results folder even when --out-details is not provided.",
+    )
+    p.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help="Output JSON path (defaults to results/<dataset>/{llm}_{embedding_model}/results_table_selection/selected_tables.json).",
+    )
     p.add_argument("--indent", type=int, default=2, help="JSON indentation level.")
     return p.parse_args(argv)
+
+
+def _partition_bounds(total: int, *, partition: int, num_partitions: int) -> Tuple[int, int]:
+    """
+    Compute contiguous [start, end) bounds for `partition` out of `num_partitions`.
+
+    Uses floor boundaries:
+      start = floor(partition * total / num_partitions)
+      end   = floor((partition + 1) * total / num_partitions)
+    """
+    if num_partitions <= 0:
+        raise ValueError(f"num_partitions must be > 0 (got {num_partitions})")
+    if partition < 0 or partition >= num_partitions:
+        raise ValueError(f"partition must be in [0, {num_partitions - 1}] (got {partition})")
+    if total <= 0:
+        return (0, 0)
+    start = (partition * total) // num_partitions
+    end = ((partition + 1) * total) // num_partitions
+    return int(start), int(end)
+
+
+def _append_partition_suffix(path: Path, *, partition: int, num_partitions: int) -> Path:
+    """
+    Append `_partition_of_num_partitions` to the filename (before extension).
+
+    Example:
+      selected_tables.json -> selected_tables_0_of_2.json
+    """
+    suffix = f"_{int(partition)}_of_{int(num_partitions)}"
+    if path.suffix:
+        return path.with_name(f"{path.stem}{suffix}{path.suffix}")
+    return path.with_name(f"{path.name}{suffix}")
 
 
 def _normalize_table_id(table_id: Any) -> str:
@@ -916,7 +981,14 @@ def _load_retrieved_tables(path: Path) -> List[List[str]]:
         out: List[List[str]] = []
         for entry in payload:
             if isinstance(entry, list):
-                out.append([_normalize_table_id(t) for t in entry])
+                # Accept either list[str] or list[{"table": "...", ...}] (dense retriever with scores).
+                normed: List[str] = []
+                for item in entry:
+                    if isinstance(item, str):
+                        normed.append(_normalize_table_id(item))
+                    elif isinstance(item, dict) and "table" in item:
+                        normed.append(_normalize_table_id(item.get("table")))
+                out.append([t for t in normed if t])
             else:
                 out.append([])
         return out
@@ -941,6 +1013,27 @@ def _load_retrieved_scores(path: Optional[Path]) -> Optional[List[List[Dict[str,
         return out
     except Exception as e:
         print(f"⚠️  Failed to read retrieved-scores file '{path}': {e}")
+        return None
+
+
+def _maybe_scores_from_data_file(path: Path) -> Optional[List[List[Dict[str, Any]]]]:
+    """If `--data` contains dict entries, reuse them as scores payload."""
+    try:
+        payload = _read_json(path)
+        if not isinstance(payload, list):
+            return None
+        out: List[List[Dict[str, Any]]] = []
+        saw_any = False
+        for entry in payload:
+            if isinstance(entry, list):
+                dicts = [x for x in entry if isinstance(x, dict)]
+                if dicts:
+                    saw_any = True
+                out.append(dicts)
+            else:
+                out.append([])
+        return out if saw_any else None
+    except Exception:
         return None
 
 
@@ -1041,8 +1134,9 @@ def _build_similarities_for_tables(
 
 def _make_config(args: argparse.Namespace) -> Configuration:
     return Configuration(
-        database_type=DatabaseType(args.database_type),
+        database_type=DatabaseType(args.dataset),
         llm_model=str(args.llm_model),
+        embedding_model=str(getattr(args, "embedding_model", "fireworks:WhereIsAI/UAE-Large-V1")),
         temperature=float(args.temperature),
     )
 
@@ -1050,16 +1144,53 @@ def _make_config(args: argparse.Namespace) -> Configuration:
 def main(args: argparse.Namespace) -> int:
     config = _make_config(args)
 
-    data_path = Path(args.data).expanduser().resolve()
-    enriched_dir = Path(args.enriched_tables).expanduser().resolve()
-    compat_dir = Path(args.similarities).expanduser().resolve()
+    # Default dense-retriever output paths derived from dataset + model tags.
+    run_dir = get_results_run_dir(
+        dataset=str(args.dataset),
+        step_dirname="results_dense_retriever",
+        llm_model=str(args.llm_model),
+        embedding_model=str(args.embedding_model),
+        project_root=PROJECT_ROOT,
+    )
 
-    database_type = DatabaseType(args.database_type)
+    if args.data:
+        data_path = Path(args.data).expanduser().resolve()
+    else:
+        data_path = (run_dir / f"{str(args.dataset)}_k_{int(args.top_k)}.json").resolve()
+
+    # If --retrieved-scores is omitted, point it to the dense-retriever scores file.
+    if args.retrieved_scores:
+        retrieved_scores_path: Optional[Path] = Path(args.retrieved_scores).expanduser().resolve()
+    else:
+        retrieved_scores_path = (run_dir / f"{str(args.dataset)}_k_{int(args.top_k)}_with_scores.json").resolve()
+    enriched_dir = (
+        Path(args.enriched_tables).expanduser().resolve()
+        if args.enriched_tables
+        else (Path(config.get_database_cache_dir("metadata")) / "enriched_tables").resolve()
+    )
+    compat_dir = (
+        Path(args.similarities).expanduser().resolve()
+        if args.similarities
+        else Path(config.get_database_cache_dir("compatibility")).expanduser().resolve()
+    )
+
+    database_type = DatabaseType(args.dataset)
     queries_path = Path(args.queries_file).expanduser().resolve() if args.queries_file else _default_queries_path(database_type)
 
     queries = _load_queries(queries_path)
     retrieved_tables_per_query = _load_retrieved_tables(data_path)
-    scores_payload = _load_retrieved_scores(Path(args.retrieved_scores).expanduser().resolve() if args.retrieved_scores else None)
+    scores_payload = None
+    if retrieved_scores_path is not None:
+        if retrieved_scores_path.exists():
+            scores_payload = _load_retrieved_scores(retrieved_scores_path)
+        else:
+            # Avoid a noisy warning when the default scores file doesn't exist yet.
+            if not args.retrieved_scores:
+                print(f"ℹ️  No retrieved-scores file found at default path: {retrieved_scores_path}")
+            else:
+                print(f"⚠️  Retrieved-scores file not found: {retrieved_scores_path}")
+    if scores_payload is None:
+        scores_payload = _maybe_scores_from_data_file(data_path)
 
     if not retrieved_tables_per_query:
         print("❌ No retrieved tables found in --data.")
@@ -1085,11 +1216,36 @@ def main(args: argparse.Namespace) -> int:
         else:
             selected_indices = all_indices
 
+    # Partitioning (optional): split `selected_indices` into contiguous partitions, then apply --start/--limit within that partition.
+    base_positions = list(range(len(selected_indices)))
+    part_start, part_end = 0, len(base_positions)
+    if getattr(args, "partition", None) is not None or getattr(args, "num_partitions", None) is not None:
+        if getattr(args, "partition", None) is None or getattr(args, "num_partitions", None) is None:
+            print("❌ Partitioning requires both --partition and --num-partitions.")
+            return 1
+        try:
+            part_start, part_end = _partition_bounds(
+                len(base_positions),
+                partition=int(args.partition),
+                num_partitions=int(args.num_partitions),
+            )
+        except Exception as e:
+            print(f"❌ Invalid partition configuration: {e}")
+            return 1
+
+    partition_positions = base_positions[part_start:part_end]
+
     start = max(0, int(args.start or 0))
-    end = len(selected_indices) if args.limit is None else min(len(selected_indices), start + int(args.limit))
-    if start >= end:
-        print(f"Nothing to do: start={start} end={end} (selected={len(selected_indices)})")
+    end_local = len(partition_positions) if args.limit is None else min(len(partition_positions), start + int(args.limit))
+    if start >= end_local:
+        print(
+            f"Nothing to do: start={start} end={end_local} "
+            f"(partition_size={len(partition_positions)} selected={len(selected_indices)})"
+        )
         return 0
+
+    # Positions into `selected_indices` we will actually process.
+    positions = partition_positions[start:end_local]
 
     selected_tables_out: List[List[str]] = []
     details_out: List[Dict[str, Any]] = []
@@ -1097,9 +1253,15 @@ def main(args: argparse.Namespace) -> int:
     print(f"Total available queries: {n}")
     if args.num_samples is not None:
         print(f"Random sampling enabled: num_samples={int(args.num_samples)} seed={int(args.random_seed)} -> selected={len(selected_indices)}")
-    print(f"Processing selected indices slice {start}..{end-1} (count={end-start})")
+    if getattr(args, "partition", None) is not None and getattr(args, "num_partitions", None) is not None:
+        # part_end is exclusive
+        print(
+            f"Partitioning enabled: partition={int(args.partition)}/{int(args.num_partitions)} "
+            f"-> global positions {part_start}..{max(part_end - 1, part_start - 1)} (count={len(partition_positions)})"
+        )
+    print(f"Processing partition-local slice {start}..{end_local-1} (count={end_local-start})")
 
-    for pos in range(start, end):
+    for pos in positions:
         idx = selected_indices[pos]
         q = queries[idx] if 0 <= idx < len(queries) else {}
         query_text = str(q.get("question", "") or "")
@@ -1155,7 +1317,7 @@ def main(args: argparse.Namespace) -> int:
 
         selected_tables_out.append(selected_tables)
 
-        if args.out_details:
+        if args.out_details or bool(args.write_details):
             # Break down final selection into: LLM-only selection and augmentation-only additions.
             llm_selected_tables: List[str] = []
             augmented_tables_only: List[str] = []
@@ -1208,12 +1370,41 @@ def main(args: argparse.Namespace) -> int:
 
         print(f"  - processed question_id={idx} (selected={len(selected_tables)})")
 
-    out_path = Path(args.out).expanduser().resolve()
+    if args.out:
+        out_path = Path(args.out).expanduser().resolve()
+    else:
+        out_dir = get_results_run_dir(
+            dataset=str(config.database_type.value),
+            step_dirname="results_table_selection",
+            llm_model=str(config.llm_model),
+            embedding_model=str(getattr(config, "embedding_model", "unknown")),
+            project_root=PROJECT_ROOT,
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = (out_dir / "selected_tables.json").resolve()
+
+    # If partitioning is enabled, suffix outputs with `{partition}_of_{num_partitions}`.
+    if getattr(args, "partition", None) is not None and getattr(args, "num_partitions", None) is not None:
+        out_path = _append_partition_suffix(
+            out_path,
+            partition=int(args.partition),
+            num_partitions=int(args.num_partitions),
+        )
     _write_json(out_path, selected_tables_out, indent=int(args.indent))
     print(f"Wrote selected tables: {out_path}")
 
-    if args.out_details:
-        out_details_path = Path(args.out_details).expanduser().resolve()
+    if args.out_details or bool(args.write_details):
+        out_details_path = (
+            Path(args.out_details).expanduser().resolve()
+            if args.out_details
+            else out_path.with_name("selected_tables_details.json")
+        )
+        if getattr(args, "partition", None) is not None and getattr(args, "num_partitions", None) is not None:
+            out_details_path = _append_partition_suffix(
+                out_details_path,
+                partition=int(args.partition),
+                num_partitions=int(args.num_partitions),
+            )
         _write_json(out_details_path, details_out, indent=int(args.indent))
         print(f"Wrote details: {out_details_path}")
 

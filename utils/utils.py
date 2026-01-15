@@ -13,6 +13,33 @@ except Exception:
     pass
 
 
+def _sanitize_path_component(value: object) -> str:
+    """Best-effort filesystem-safe-ish component for cache/results paths."""
+    s = str(value or "").strip()
+    if not s:
+        return "unknown"
+    return "".join(c if c.isalnum() else "_" for c in s)
+
+
+def make_run_tag(*, llm_model: str, embedding_model: str) -> str:
+    """Return `{llm}_{embedding_model}` with safe path characters."""
+    return f"{_sanitize_path_component(llm_model)}_{_sanitize_path_component(embedding_model)}"
+
+
+def get_results_run_dir(
+    *,
+    dataset: str,
+    step_dirname: str,
+    llm_model: str,
+    embedding_model: str,
+    project_root: Optional[Path] = None,
+) -> Path:
+    """Return `<project_root>/results/<dataset>/{llm}_{embedding_model}/<step_dirname>`."""
+    root = project_root or _detect_project_root()
+    run_tag = make_run_tag(llm_model=llm_model, embedding_model=embedding_model)
+    return (root / "results" / str(dataset) / run_tag / str(step_dirname)).resolve()
+
+
 class DatabaseType(str, Enum):
     """Supported database types."""
 
@@ -28,17 +55,20 @@ class Configuration:
         self,
         database_type: DatabaseType = DatabaseType.BIRD,
         llm_model: str = "openai:gpt-4o-mini",
+        embedding_model: str = "fireworks:WhereIsAI/UAE-Large-V1",
         temperature: float = 0.0,
         **_kwargs,
     ):
         self.database_type = database_type
         self.llm_model = llm_model
+        self.embedding_model = embedding_model
         self.temperature = temperature
 
     def get_database_cache_dir(self, name: str) -> str:
-        """Return `<project_root>/cache/<dataset>/<name>`."""
+        """Return `<project_root>/cache/<dataset>/{llm}_{embedding_model}/<name>`."""
         root = _detect_project_root()
-        return str(root / "cache" / self.database_type.value / name)
+        run_tag = make_run_tag(llm_model=self.llm_model, embedding_model=self.embedding_model)
+        return str(root / "cache" / self.database_type.value / run_tag / name)
 
     def create_llm(self):
         """Create a chat model used by standalone scripts.

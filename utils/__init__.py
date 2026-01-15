@@ -3,6 +3,8 @@
 from .utils import (
     DatabaseType,
     Configuration,
+    get_results_run_dir,
+    make_run_tag,
     create_embeddings,
     create_reranker,
 )
@@ -15,6 +17,8 @@ from .cache_scripts.selection_cache import SelectionCache, get_selection_cache
 __all__ = [
     "DatabaseType",
     "Configuration",
+    "make_run_tag",
+    "get_results_run_dir",
     "create_embeddings",
     "create_reranker",
     "MetadataCache",

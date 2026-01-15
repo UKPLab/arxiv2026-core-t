@@ -6,26 +6,8 @@ This script reads a dataset file with questions (e.g., data/bird/dev.json)
 and a per-question list of selected tables (e.g., results/.../selected_tables.json),
 then generates one SQLite SQL query per question using an LLM.
 
-Inputs:
-  - --data: JSON list[dict] with fields like {db_id, question, evidence, ...}
-  - --selected-tables: JSON list[list[str]] of table identifiers ("db_id#sep#table")
-  - --enriched-tables: directory of per-table enriched JSON files
-
-Outputs:
-  - --out: JSON list[str|null] (one SQL string per processed question)
-  - --out-details: JSON list[dict] with per-question metadata, errors, usage, etc.
-
-Example:
-python sql_generator.py \
-  --data data/bird/dev.json \
-  --selected-tables results/results_table_selection/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/selected_tables.json \
-  --enriched-tables cache/bird/metadata/enriched_tables \
-  --database-type bird \
-  --sql-model "openai:gpt_4o_mini" \
-  --temperature 0.0 \
-  --num-samples 1534 \
-  --out results/results_sql_generation/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/sqls.json \
-  --out-details results/results_sql_generation/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/sqls_details.json
+Usage:
+    python sql_generator.py --dataset bird --sql-model "openai:gpt_4o_mini" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1" --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo"
 """
 
 from __future__ import annotations
@@ -61,7 +43,7 @@ try:
 except Exception:
     pass
 
-from utils import DatabaseType, Configuration  # noqa: E402
+from utils import DatabaseType, Configuration, get_results_run_dir  # noqa: E402
 from utils.db_connector import get_database_schema, get_table_relationships  # noqa: E402
 from utils.prompts import get_sql_generation_prompt_lrm  # noqa: E402
 from utils.storage_manager import UnifiedStorageManager  # noqa: E402
@@ -603,38 +585,101 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "The selected tables input is typically the output of table_selector.py."
         )
     )
-    p.add_argument("--data", type=str, required=True, help="Dataset JSON path (list[dict] with db_id/question/evidence).")
+    p.add_argument(
+        "--data",
+        type=str,
+        default=None,
+        help="Dataset JSON path (defaults to data/<dataset>/dev.json).",
+    )
     p.add_argument(
         "--selected-tables",
         type=str,
-        required=True,
-        help="Path to selected tables JSON (list[list[str]] of db_id#sep#table).",
+        default=None,
+        help="Path to selected tables JSON (defaults to results/<dataset>/{llm}_{embedding_model}/results_table_selection/selected_tables.json).",
     )
     p.add_argument(
         "--enriched-tables",
         type=str,
-        required=True,
-        help="Path to enriched tables cache directory.",
+        default=None,
+        help="Path to enriched tables cache directory (defaults to cache/<dataset>/{llm}_{embedding_model}/metadata/enriched_tables).",
     )
     p.add_argument(
-        "--database-type",
+        "--dataset",
+        dest="dataset",
         choices=[dt.value for dt in DatabaseType],
         default=DatabaseType.BIRD.value,
-        help="Dataset type used for cache directory resolution.",
+        help="Dataset used for cache/results path resolution.",
+    )
+    # Backward-compatible alias.
+    p.add_argument(
+        "--database-type",
+        dest="dataset",
+        choices=[dt.value for dt in DatabaseType],
+        default=DatabaseType.BIRD.value,
+        help="(deprecated) Same as --dataset.",
     )
     p.add_argument("--sql-model", type=str, required=True, help="SQL LLM id for LangChain init_chat_model.")
+    p.add_argument(
+        "--llm-model",
+        type=str,
+        default="openai:gpt-4o-mini",
+        help="Run tag used for cache/results path resolution (should match table_selector/dense_retriever llm-model).",
+    )
+    p.add_argument(
+        "--embedding-model",
+        type=str,
+        default="fireworks:WhereIsAI/UAE-Large-V1",
+        help="Embedding model tag used for cache/results run folder naming.",
+    )
     p.add_argument("--temperature", type=float, default=0.0, help="LLM temperature.")
     p.add_argument("--num-samples", type=int, default=None, help="Process only the first N questions (deterministic).")
-    p.add_argument("--out", type=str, required=True, help="Output JSON path (list[str|null]).")
-    p.add_argument("--out-details", type=str, required=True, help="Output JSON path with verbose per-question details.")
+    p.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help="Output JSON path (defaults to results/<dataset>/{llm}_{embedding_model}/results_sql_generation/sqls.json).",
+    )
+    p.add_argument(
+        "--out-details",
+        type=str,
+        default=None,
+        help="Output JSON path with verbose per-question details (defaults to results/<dataset>/{llm}_{embedding_model}/results_sql_generation/sqls_details.json).",
+    )
     p.add_argument("--indent", type=int, default=2, help="JSON indentation level.")
     return p.parse_args(argv)
 
 
 def main(args: argparse.Namespace) -> int:
-    data_path = Path(args.data).expanduser().resolve()
-    selected_tables_path = Path(args.selected_tables).expanduser().resolve()
-    enriched_dir = Path(args.enriched_tables).expanduser().resolve()
+    dataset = DatabaseType(args.dataset)
+    data_path = (
+        Path(args.data).expanduser().resolve()
+        if args.data
+        else (PROJECT_ROOT / "data" / dataset.value / "dev.json").resolve()
+    )
+    config = Configuration(
+        database_type=dataset,
+        # IMPORTANT: this is used to resolve cache/results paths (run tag), not the SQL model.
+        llm_model=str(args.llm_model),
+        embedding_model=str(args.embedding_model),
+        temperature=float(args.temperature),
+    )
+
+    if args.selected_tables:
+        selected_tables_path = Path(args.selected_tables).expanduser().resolve()
+    else:
+        run_dir = get_results_run_dir(
+            dataset=str(config.database_type.value),
+            step_dirname="results_table_selection",
+            llm_model=str(config.llm_model),
+            embedding_model=str(config.embedding_model),
+            project_root=PROJECT_ROOT,
+        )
+        selected_tables_path = (run_dir / "selected_tables.json").resolve()
+
+    if args.enriched_tables:
+        enriched_dir = Path(args.enriched_tables).expanduser().resolve()
+    else:
+        enriched_dir = (Path(config.get_database_cache_dir("metadata")) / "enriched_tables").resolve()
 
     if not data_path.exists():
         print(f"❌ Data file not found: {data_path}")
@@ -646,9 +691,7 @@ def main(args: argparse.Namespace) -> int:
         print(f"❌ Enriched-tables directory not found: {enriched_dir}")
         return 1
 
-    dataset = DatabaseType(args.database_type)
-    config = Configuration(database_type=dataset, llm_model=str(args.sql_model), temperature=float(args.temperature))
-    storage = UnifiedStorageManager(config=config, cache_dir=str(PROJECT_ROOT / "cache" / dataset.value))
+    storage = UnifiedStorageManager(config=config, cache_dir="cache")
 
     payload = _read_json(data_path)
     if not isinstance(payload, list):
@@ -752,8 +795,31 @@ def main(args: argparse.Namespace) -> int:
             f"cache_hit={'yes' if cache_hit else 'no'} -> {'OK' if ok else 'FAIL'}"
         )
 
-    out_path = Path(args.out).expanduser().resolve()
-    out_details_path = Path(args.out_details).expanduser().resolve()
+    if args.out:
+        out_path = Path(args.out).expanduser().resolve()
+    else:
+        out_dir = get_results_run_dir(
+            dataset=str(config.database_type.value),
+            step_dirname="results_sql_generation",
+            llm_model=str(config.llm_model),
+            embedding_model=str(config.embedding_model),
+            project_root=PROJECT_ROOT,
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = (out_dir / "sqls.json").resolve()
+
+    if args.out_details:
+        out_details_path = Path(args.out_details).expanduser().resolve()
+    else:
+        out_dir = get_results_run_dir(
+            dataset=str(config.database_type.value),
+            step_dirname="results_sql_generation",
+            llm_model=str(config.llm_model),
+            embedding_model=str(config.embedding_model),
+            project_root=PROJECT_ROOT,
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_details_path = (out_dir / "sqls_details.json").resolve()
     _write_json(out_path, sqls_out, indent=int(args.indent))
     _write_json(out_details_path, details_out, indent=int(args.indent))
     print(f"Wrote SQLs: {out_path}")

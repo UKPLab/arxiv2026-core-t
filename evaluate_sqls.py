@@ -7,21 +7,8 @@ executed rows to the gold execution results stored in `data/{dataset}/dev_query_
 
 It focuses on (values-only) comparison by default.
 
-Inputs:
-  - --exec-details: sqls_exec_details.json from `sql_executor.py` (list[dict])
-  - --gold:         gold execution results JSON (list[list[dict]]) (default: data/{dataset}/dev_query_results.json)
-
-Outputs:
-  - --out:          evaluation summary JSON (dict with overall + per-question summary)
-  - --out-details:  (optional) per-question details JSON (list[dict])
-
-Example:
-python evaluate_sqls.py \
-  --exec-details results/results_sql_execution/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/sqls_exec_details.json \
-  --gold data/bird/dev_query_results.json \
-  --values-only \
-  --out results/results_sql_evaluation/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/eval_values_only.json \
-  --out-details results/results_sql_evaluation/together_Qwen_Qwen2_5_7B_Instruct_Turbo_fireworks_WhereIsAI_UAE_Large_V1/eval_values_only_details.json
+Usage:
+    python evaluate_sqls.py --dataset bird --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1"
 """
 
 from __future__ import annotations
@@ -52,6 +39,8 @@ try:
     load_dotenv(PROJECT_ROOT / ".env")
 except Exception:
     pass
+
+from utils import get_results_run_dir  # noqa: E402
 
 
 def _read_json(path: Path) -> Any:
@@ -162,16 +151,38 @@ def _truncate_rows(rows: Any, max_rows: int) -> Any:
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate executed SQL rows vs gold execution results (values-only by default).")
     p.add_argument(
+        "--dataset",
+        dest="dataset",
+        type=str,
+        default="bird",
+        help="Dataset used for default gold path and default exec-details path.",
+    )
+    # Backward-compatible alias.
+    p.add_argument(
+        "--database-type",
+        dest="dataset",
+        type=str,
+        default="bird",
+        help="(deprecated) Same as --dataset.",
+    )
+    p.add_argument("--llm-model", type=str, default="openai:gpt-4o-mini", help="LLM tag used for results run folder naming.")
+    p.add_argument(
+        "--embedding-model",
+        type=str,
+        default="fireworks:WhereIsAI/UAE-Large-V1",
+        help="Embedding model tag used for results run folder naming.",
+    )
+    p.add_argument(
         "--exec-details",
         type=str,
-        required=True,
-        help="Path to sqls_exec_details.json from sql_executor.py (list[dict] with 'rows').",
+        default=None,
+        help="Path to sqls_exec_details.json from sql_executor.py (defaults to results/<dataset>/{llm}_{embedding_model}/results_sql_generation/sqls_exec_details.json).",
     )
     p.add_argument(
         "--gold",
         type=str,
-        default=str(PROJECT_ROOT / "data" / "dataset" / "dev_query_results.json"),
-        help="Path to gold execution results JSON (list[list[dict]]).",
+        default=None,
+        help="Path to gold execution results JSON (list[list[dict]]) (defaults to data/<database-type>/dev_query_results.json).",
     )
     p.add_argument(
         "--values-only",
@@ -208,8 +219,19 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=50,
         help="Max rows to store for pred/gold in --out-details (default: 50). Use -1 for all.",
     )
-    p.add_argument("--out", type=str, required=True, help="Output JSON path (evaluation summary dict).")
+    p.add_argument(
+        "--out",
+        type=str,
+        default=None,
+        help="Output JSON path (defaults to results/<dataset>/{llm}_{embedding_model}/results_sql_generation/eval_*.json).",
+    )
     p.add_argument("--out-details", type=str, default=None, help="Optional output JSON path (per-question details list).")
+    p.add_argument(
+        "--write-details",
+        action="store_true",
+        default=False,
+        help="If set, write details to the default output folder even when --out-details is not provided.",
+    )
     p.add_argument("--indent", type=int, default=2, help="JSON indentation level.")
     return p.parse_args(argv)
 
@@ -222,9 +244,74 @@ def _coerce_index(item: Dict[str, Any], fallback: int) -> int:
         return int(fallback)
 
 
+def _load_gold_table_counts(path: Path) -> Optional[List[int]]:
+    """
+    Load `dev_gold_tables.json` and return per-question gold table counts by index.
+
+    Expected format: list[dict] with a `tables` field (list[str]).
+    """
+    if not path.exists():
+        return None
+    try:
+        payload = _read_json(path)
+        if not isinstance(payload, list):
+            return None
+        counts: List[int] = []
+        for entry in payload:
+            if not isinstance(entry, dict):
+                counts.append(0)
+                continue
+            tables = entry.get("tables", []) or []
+            counts.append(int(len(tables)) if isinstance(tables, list) else 0)
+        return counts
+    except Exception:
+        return None
+
+
+def _init_counts() -> Dict[str, int]:
+    return {
+        "total": 0,
+        "evaluated": 0,
+        "executed_ok": 0,
+        "executed_fail": 0,
+        "has_rows_field": 0,
+        "gold_provided_truthy": 0,
+        "exact_match": 0,
+        "skipped_no_rows": 0,
+        "skipped_empty_gold": 0,
+    }
+
+
+def _counts_to_metrics(counts: Dict[str, int]) -> Dict[str, float]:
+    denom_all = max(1, int(counts.get("total", 0)))
+    denom_executed_ok = max(1, int(counts.get("executed_ok", 0)))
+    return {
+        "exact_match_rate_all": float(counts.get("exact_match", 0)) / denom_all,
+        "execution_success_rate": float(counts.get("executed_ok", 0)) / denom_all,
+        "exact_match_rate_executed_ok": float(counts.get("exact_match", 0)) / denom_executed_ok,
+    }
+
+
 def main(args: argparse.Namespace) -> int:
-    exec_details_path = Path(args.exec_details).expanduser().resolve()
-    gold_path = Path(args.gold).expanduser().resolve()
+    dataset = str(args.dataset or "bird").strip()
+    gen_dir = get_results_run_dir(
+        dataset=str(dataset),
+        step_dirname="results_sql_generation",
+        llm_model=str(args.llm_model),
+        embedding_model=str(args.embedding_model),
+        project_root=PROJECT_ROOT,
+    )
+    exec_details_path = (
+        Path(args.exec_details).expanduser().resolve()
+        if args.exec_details
+        else (gen_dir / "sqls_exec_details.json").resolve()
+    )
+    gold_path = (
+        Path(args.gold).expanduser().resolve()
+        if args.gold
+        else (PROJECT_ROOT / "data" / dataset / "dev_query_results.json").resolve()
+    )
+    gold_tables_path = (PROJECT_ROOT / "data" / dataset / "dev_gold_tables.json").resolve()
 
     if not exec_details_path.exists():
         print(f"❌ exec-details file not found: {exec_details_path}")
@@ -245,6 +332,7 @@ def main(args: argparse.Namespace) -> int:
 
     exec_items: List[Dict[str, Any]] = [x for x in exec_payload if isinstance(x, dict)]
     gold_results: List[Any] = list(gold_payload)
+    gold_table_counts = _load_gold_table_counts(gold_tables_path)
 
     n = min(len(exec_items), len(gold_results))
     if n == 0:
@@ -266,16 +354,11 @@ def main(args: argparse.Namespace) -> int:
     per_question_summary: List[Dict[str, Any]] = []
     per_question_details: List[Dict[str, Any]] = []
 
-    counts = {
-        "total": 0,
-        "evaluated": 0,
-        "executed_ok": 0,
-        "executed_fail": 0,
-        "has_rows_field": 0,
-        "gold_provided_truthy": 0,
-        "exact_match": 0,
-        "skipped_no_rows": 0,
-        "skipped_empty_gold": 0,
+    counts = _init_counts()
+    counts_by_case: Dict[str, Dict[str, int]] = {
+        "all": _init_counts(),
+        "gold_tables_eq_1": _init_counts(),
+        "gold_tables_ge_2": _init_counts(),
     }
 
     print(f"Loaded exec details: {len(exec_items)} | gold: {len(gold_results)} | processing: {end-start}")
@@ -284,6 +367,18 @@ def main(args: argparse.Namespace) -> int:
     for local_i, i in enumerate(range(start, end), start=1):
         ex = exec_items[i]
         gold = gold_results[i] if i < len(gold_results) else None
+        gold_table_count = None
+        try:
+            if gold_table_counts is not None and 0 <= i < len(gold_table_counts):
+                gold_table_count = int(gold_table_counts[i])
+        except Exception:
+            gold_table_count = None
+
+        case_keys: List[str] = ["all"]
+        if gold_table_count == 1:
+            case_keys.append("gold_tables_eq_1")
+        elif isinstance(gold_table_count, int) and gold_table_count >= 2:
+            case_keys.append("gold_tables_ge_2")
 
         idx = _coerce_index(ex, i)
         qid = ex.get("question_id", idx)
@@ -299,21 +394,27 @@ def main(args: argparse.Namespace) -> int:
         gold_truthy = bool(gold) if gold_ok else False
         gold_is_evaluable = bool(gold_truthy or evaluate_empty_gold)
 
-        counts["total"] += 1
-        if has_rows:
-            counts["has_rows_field"] += 1
-        else:
-            counts["skipped_no_rows"] += 1
-        if gold_truthy:
-            counts["gold_provided_truthy"] += 1
-        if executed_ok:
-            counts["executed_ok"] += 1
-        else:
-            counts["executed_fail"] += 1
+        for ck in case_keys:
+            cc = counts_by_case[ck]
+            cc["total"] += 1
+            if has_rows:
+                cc["has_rows_field"] += 1
+            else:
+                cc["skipped_no_rows"] += 1
+            if gold_truthy:
+                cc["gold_provided_truthy"] += 1
+            if executed_ok:
+                cc["executed_ok"] += 1
+            else:
+                cc["executed_fail"] += 1
+
+        # Keep existing aggregate counts for backward compatibility.
+        counts = counts_by_case["all"]
 
         exact_match = False
         if executed_ok and has_rows and gold_ok and gold_is_evaluable:
-            counts["evaluated"] += 1
+            for ck in case_keys:
+                counts_by_case[ck]["evaluated"] += 1
             exact_match = compare_query_results(
                 pred_rows,
                 gold,
@@ -321,14 +422,17 @@ def main(args: argparse.Namespace) -> int:
                 float_tolerance=float_tol,
             )
             if exact_match:
-                counts["exact_match"] += 1
+                for ck in case_keys:
+                    counts_by_case[ck]["exact_match"] += 1
         elif has_rows and gold_ok and (not gold_is_evaluable):
-            counts["skipped_empty_gold"] += 1
+            for ck in case_keys:
+                counts_by_case[ck]["skipped_empty_gold"] += 1
 
         summary = {
             "question_id": qid,
             "index": idx,
             "db_id": db_id,
+            "gold_table_count": gold_table_count,
             "executed": bool(ex.get("executed", False)),
             "error": ex.get("error"),
             "row_count": int(ex.get("row_count", len(pred_rows or [])) or 0),
@@ -341,7 +445,7 @@ def main(args: argparse.Namespace) -> int:
         }
         per_question_summary.append(summary)
 
-        if args.out_details:
+        if args.out_details or bool(args.write_details):
             per_question_details.append(
                 {
                     **summary,
@@ -354,16 +458,17 @@ def main(args: argparse.Namespace) -> int:
 
         # lightweight progress
         if local_i == 1 or local_i % 200 == 0:
-            print(f"  - processed {local_i}/{end-start} | exact_match={counts['exact_match']} executed_ok={counts['executed_ok']}")
-
-    denom_all = max(1, counts["total"])
-    denom_executed_ok = max(1, counts["executed_ok"])
-    denom_evaluated = max(1, counts["evaluated"])
+            all_counts = counts_by_case["all"]
+            print(
+                f"  - processed {local_i}/{end-start} | "
+                f"exact_match={all_counts['exact_match']} executed_ok={all_counts['executed_ok']}"
+            )
 
     overall = {
         "inputs": {
             "exec_details": str(exec_details_path),
             "gold": str(gold_path),
+            "gold_tables": str(gold_tables_path) if (gold_table_counts is not None) else None,
         },
         "settings": {
             "values_only": bool(values_only),
@@ -371,21 +476,35 @@ def main(args: argparse.Namespace) -> int:
             "start": start,
             "end": end,
         },
-        "counts": counts,
-        "metrics": {
-            "exact_match_rate_all": counts["exact_match"] / denom_all,
-            "execution_success_rate": counts["executed_ok"] / denom_all,
-            "exact_match_rate_executed_ok": counts["exact_match"] / denom_executed_ok,
+        "counts": counts_by_case["all"],
+        "metrics": _counts_to_metrics(counts_by_case["all"]),
+        "by_gold_table_count": {
+            "all": {"counts": counts_by_case["all"], "metrics": _counts_to_metrics(counts_by_case["all"])},
+            "gold_tables_eq_1": {
+                "counts": counts_by_case["gold_tables_eq_1"],
+                "metrics": _counts_to_metrics(counts_by_case["gold_tables_eq_1"]),
+            },
+            "gold_tables_ge_2": {
+                "counts": counts_by_case["gold_tables_ge_2"],
+                "metrics": _counts_to_metrics(counts_by_case["gold_tables_ge_2"]),
+            },
         },
         "per_question": per_question_summary,
     }
 
-    out_path = Path(args.out).expanduser().resolve()
+    # Write evaluation outputs alongside sql generation outputs (same run folder).
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    # Default output filename is stable (no settings encoded in name).
+    out_path = Path(args.out).expanduser().resolve() if args.out else (gen_dir / "eval_summary.json").resolve()
     _write_json(out_path, overall, indent=int(args.indent))
     print(f"Wrote evaluation summary: {out_path}")
 
-    if args.out_details:
-        out_details_path = Path(args.out_details).expanduser().resolve()
+    if args.out_details or bool(args.write_details):
+        out_details_path = (
+            Path(args.out_details).expanduser().resolve()
+            if args.out_details
+            else (gen_dir / "eval_summary_details.json").resolve()
+        )
         _write_json(out_details_path, per_question_details, indent=int(args.indent))
         print(f"Wrote evaluation details: {out_details_path}")
 

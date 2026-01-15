@@ -13,8 +13,16 @@ Key format:
 
 import hashlib
 import json
+import os
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+try:
+    import fcntl  # POSIX-only; used for cross-process file locking
+except Exception:  # pragma: no cover - fallback for non-POSIX systems
+    fcntl = None
 
 
 class SelectionCache:
@@ -37,17 +45,97 @@ class SelectionCache:
         self.selections: Dict[str, Dict[str, Any]] = {}
         self._load_cache()
 
-    def _load_cache(self) -> None:
-        if not self.cache_file.exists():
+    # -----------------------------
+    # Low-level persistence helpers
+    # -----------------------------
+    def _lock_path(self) -> Path:
+        """Return the path to the lock file for this cache file."""
+        return self.cache_file.with_suffix(self.cache_file.suffix + ".lock")
+
+    @contextmanager
+    def _acquire_lock(self, timeout: float = 60.0, poll_interval: float = 0.1):
+        """
+        Cross-process file lock using fcntl where available.
+
+        On non-POSIX platforms (no fcntl), this becomes a no-op so that the
+        cache remains usable, albeit without cross-process safety guarantees.
+        """
+        if fcntl is None:
+            yield
             return
+
+        lock_path = self._lock_path()
+        start = time.monotonic()
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if (time.monotonic() - start) > timeout:
+                        raise TimeoutError(f"Timed out acquiring lock for {lock_path}")
+                    time.sleep(poll_interval)
+            yield
+        finally:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def _read_cache_file(self) -> Dict[str, Any]:
+        """Read the on-disk JSON cache file; return {} on any error."""
+        if not self.cache_file.exists():
+            return {}
         try:
             with self.cache_file.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-            self.selections = data if isinstance(data, dict) else {}
-            self._migrate_in_place()
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _write_cache_file(self, data: Dict[str, Any]) -> None:
+        """
+        Write JSON atomically to the cache file.
+
+        We write to a temporary file in the same directory and then atomically
+        replace the target file to avoid partial writes being observed by other
+        processes.
+        """
+        tmp_path = self.cache_file.with_suffix(self.cache_file.suffix + f".{os.getpid()}.tmp")
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.cache_file)
+        finally:
+            # Best-effort cleanup if something went wrong before replace
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+    def _load_cache(self) -> None:
+        try:
+            # Even reads benefit from locking: avoids seeing partially replaced files on some FS setups.
+            with self._acquire_lock():
+                self.selections = self._read_cache_file()
         except Exception:
             # Corrupt cache should never crash callers.
             self.selections = {}
+
+        # Best-effort migration to current shape (will re-save safely if needed).
+        try:
+            self._migrate_in_place()
+        except Exception:
+            pass
 
     def _migrate_in_place(self) -> None:
         """Best-effort migration to match the current cache shape."""
@@ -134,18 +222,25 @@ class SelectionCache:
             self._save_cache()
 
     def _save_cache(self) -> None:
-        # Best-effort atomic write.
-        tmp = self.cache_file.with_suffix(".tmp")
+        """
+        Persist cache contents to disk with cross-process safety.
+
+        To avoid lost updates when multiple processes write concurrently, we:
+        1. Acquire an exclusive file lock (when supported).
+        2. Reload the current on-disk JSON (if any).
+        3. Merge the in-memory entries into the on-disk dictionary.
+        4. Atomically replace the on-disk JSON file.
+        """
         try:
-            with tmp.open("w", encoding="utf-8") as f:
-                json.dump(self.selections, f, indent=2, ensure_ascii=False)
-            tmp.replace(self.cache_file)
+            with self._acquire_lock():
+                on_disk = self._read_cache_file()
+                on_disk.update(self.selections)
+                self._write_cache_file(on_disk)
+                # Keep in-memory view in sync with the on-disk representation.
+                self.selections = on_disk
         except Exception:
-            try:
-                if tmp.exists():
-                    tmp.unlink()
-            except Exception:
-                pass
+            # Best-effort: never crash callers due to cache write issues.
+            return
 
     def _get_llm_name(self, config: Optional[Any] = None) -> str:
         """Return a filesystem-safe-ish model name used to disambiguate entries."""

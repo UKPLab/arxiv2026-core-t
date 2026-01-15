@@ -85,7 +85,17 @@ class UnifiedStorageManager:
         
         # If using default cache directory, make it database-specific
         if cache_dir == "cache":
-            cache_dir = f"cache/{config.database_type.value}"
+            # New cache layout: cache/<dataset>/{llm}_{embedding_model}/...
+            try:
+                from utils import make_run_tag  # local package import
+
+                run_tag = make_run_tag(
+                    llm_model=getattr(config, "llm_model", "unknown"),
+                    embedding_model=getattr(config, "embedding_model", "unknown"),
+                )
+            except Exception:
+                run_tag = "unknown_unknown"
+            cache_dir = f"cache/{config.database_type.value}/{run_tag}"
             
         # results_dir is now optional since we primarily use database-specific caches
         if results_dir is not None:

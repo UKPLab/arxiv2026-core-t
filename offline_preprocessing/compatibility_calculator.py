@@ -13,7 +13,7 @@ Outputs:
   - (Optional) table-parameter caches under `cache/{dataset}/tables_parameters/`
 
 Usage:
-  python offline_preprocessing/compatibility_calculator.py --database-type bird --batch-size 50 --embedding-model "fireworks:WhereIsAI/UAE-Large-V1"
+  python offline_preprocessing/compatibility_calculator.py --dataset bird --batch-size 50 --embedding-model "fireworks:WhereIsAI/UAE-Large-V1" --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo"
 """
 
 import argparse
@@ -598,10 +598,19 @@ class CompatibilityCalculator:
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compute and cache pairwise table compatibility scores.")
     parser.add_argument(
-        "--database-type",
+        "--dataset",
+        dest="dataset",
         choices=[dt.value for dt in DatabaseType],
         default=DatabaseType.BIRD.value,
         help="Dataset to operate on.",
+    )
+    # Backward-compatible alias.
+    parser.add_argument(
+        "--database-type",
+        dest="dataset",
+        choices=[dt.value for dt in DatabaseType],
+        default=DatabaseType.BIRD.value,
+        help="(deprecated) Same as --dataset.",
     )
     parser.add_argument("--batch-size", type=int, default=50, help="Number of pairs per batch.")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of tables to process (for quick tests).")
@@ -616,6 +625,12 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=str,
         default="openai:text-embedding-3-large",
         help="Embedding model for semantic column similarity (provider-prefixed supported).",
+    )
+    parser.add_argument(
+        "--llm-model",
+        type=str,
+        default="openai:gpt-4o-mini",
+        help="LLM tag used for cache run folder naming.",
     )
     parser.add_argument("--dry-run", action="store_true", default=False, help="Load identifiers and print counts only.")
 
@@ -651,7 +666,7 @@ def _print_summary(results: Dict[str, Any]) -> None:
 
 
 def main(args: argparse.Namespace) -> int:
-    database_type = DatabaseType(args.database_type)
+    database_type = DatabaseType(args.dataset)
     table_ids = _load_table_identifiers(database_type, args.tables_file)
     if args.limit is not None:
         table_ids = table_ids[: int(args.limit)]
@@ -666,14 +681,13 @@ def main(args: argparse.Namespace) -> int:
         print(f"Pairs:  {total_pairs}")
         return 0
 
-    # Storage manager rooted at cache/{dataset}/...
-    storage = get_unified_storage_manager(database_type=database_type.value)
-    cache_root = PROJECT_ROOT / "cache" / database_type.value
-    storage.cache_dir = cache_root
-    storage.compatibility_cache_dir = cache_root / "compatibility"
-    storage.compatibility_cache_dir.mkdir(parents=True, exist_ok=True)
-
-    config = Configuration(database_type=database_type)
+    config = Configuration(
+        database_type=database_type,
+        llm_model=str(args.llm_model),
+        embedding_model=str(args.embedding_model),
+    )
+    # New cache layout is handled by UnifiedStorageManager when cache_dir="cache".
+    storage = UnifiedStorageManager(config=config, cache_dir="cache")
     calc = CompatibilityCalculator(
         config=config,
         storage=storage,
