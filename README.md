@@ -79,7 +79,7 @@ We run experiments on **three text-to-SQL benchmarks**:
 We preprocessed these datasets to follow our open-book setting by merging tables from
 multiple DBs (or question-specific schemas for MMQA) into a single retrieval corpus per benchmark. For convenience, we provide the required preprocessed `data/` and `sql_database/` folders (and an optional `cache/` folder) in a single download:
 
-- Download link: [link](TBD.)
+- You can access the datasets by following this [link](https://tudatalib.ulb.tu-darmstadt.de/handle/tudatalib/4993).
 
 After downloading, extract the archive into the repository root so you get:
 
