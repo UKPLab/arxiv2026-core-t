@@ -71,154 +71,8 @@ class Configuration:
         return str(root / "cache" / self.database_type.value / run_tag / name)
 
     def create_llm(self):
-        """Create a chat model used by standalone scripts.
-
-        Supports common LangChain providers (OpenAI, Together, Gemini, etc.) via
-        `init_chat_model`, and additionally supports local Hugging Face models
-        (e.g., `huggingface:meta-llama/Llama-3.1-8B-Instruct`) via a transformers
-        pipeline wrapped as a LangChain chat model.
-        """
-
-        def _is_huggingface_model(model_name: str) -> bool:
-            return isinstance(model_name, str) and (
-                model_name.startswith("huggingface:") or model_name.startswith("hf:")
-            )
-
-        def _create_huggingface_chat(model_name: str):
-            """Create a ChatHuggingFace model backed by a transformers pipeline.
-
-            This mirrors the cluster setup used for:
-            - meta-llama/Llama-3.1-8B-Instruct
-            - Qwen/Qwen2.5-7B-Instruct
-            """
-            try:
-                import torch  # type: ignore
-                from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline  # type: ignore
-                from langchain_huggingface import ChatHuggingFace, HuggingFacePipeline  # type: ignore
-            except Exception as import_exc:  # pragma: no cover
-                raise ImportError(
-                    "Hugging Face support requires 'transformers', 'torch', and 'langchain-huggingface'. "
-                    "Install with: pip install -U transformers torch langchain-huggingface"
-                ) from import_exc
-
-            # Strip provider prefix to get the HF repo id.
-            repo_id = model_name.split(":", 1)[1] if ":" in model_name else model_name
-
-            is_llama_3_1_8b = repo_id == "meta-llama/Llama-3.1-8B-Instruct"
-            is_qwen_2_5_7b = repo_id == "Qwen/Qwen2.5-7B-Instruct"
-
-            # Ensure HF caches are writable inside the project directory.
-            try:
-                project_root = _detect_project_root()
-                hf_home = project_root / ".hf_cache"
-                transformers_cache = hf_home / "transformers"
-                hub_cache = hf_home / "hub"
-                hf_home.mkdir(parents=True, exist_ok=True)
-                transformers_cache.mkdir(parents=True, exist_ok=True)
-                hub_cache.mkdir(parents=True, exist_ok=True)
-                os.environ.setdefault("HF_HOME", str(hf_home))
-                os.environ.setdefault("TRANSFORMERS_CACHE", str(transformers_cache))
-                os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hub_cache))
-            except Exception:
-                pass
-
-            # Respect an HF token from environment for gated repos.
-            try:
-                hf_token = (
-                    os.environ.get("HUGGINGFACEHUB_API_TOKEN")
-                    or os.environ.get("HF_TOKEN")
-                    or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-                )
-                if hf_token:
-                    os.environ.setdefault("HF_TOKEN", hf_token)
-                    os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", hf_token)
-            except Exception:
-                pass
-
-            tokenizer = AutoTokenizer.from_pretrained(
-                repo_id,
-                use_fast=True,
-                cache_dir=os.environ.get("TRANSFORMERS_CACHE"),
-            )
-            if is_llama_3_1_8b and getattr(tokenizer, "pad_token_id", None) is None:
-                tokenizer.pad_token = tokenizer.eos_token
-
-            # Use device_map="auto" only if accelerate is installed.
-            has_accelerate = False
-            try:
-                import accelerate  # type: ignore  # noqa: F401
-
-                has_accelerate = True
-            except Exception:
-                has_accelerate = False
-
-            try:
-                model_kwargs = {
-                    "torch_dtype": torch.bfloat16 if (is_llama_3_1_8b or is_qwen_2_5_7b) else "auto",
-                    "cache_dir": os.environ.get("TRANSFORMERS_CACHE"),
-                }
-                if has_accelerate:
-                    model_kwargs["device_map"] = "auto"
-                model = AutoModelForCausalLM.from_pretrained(repo_id, **model_kwargs)
-            except Exception:
-                model = AutoModelForCausalLM.from_pretrained(
-                    repo_id,
-                    cache_dir=os.environ.get("TRANSFORMERS_CACHE"),
-                )
-
-            do_sample = bool(self.temperature and self.temperature > 0.0)
-            gen_kwargs = {
-                "max_new_tokens": 16384,
-                "do_sample": do_sample,
-                "pad_token_id": getattr(tokenizer, "eos_token_id", None),
-                "return_full_text": False,
-            }
-            if do_sample:
-                gen_kwargs["temperature"] = max(0.0, float(self.temperature or 0.0))
-
-            gen_pipe = pipeline(
-                "text-generation",
-                model=model,
-                tokenizer=tokenizer,
-                **gen_kwargs,
-            )
-            hf_llm = HuggingFacePipeline(pipeline=gen_pipe)
-
-            # For these instruct models, apply the tokenizer chat template.
-            if is_llama_3_1_8b or is_qwen_2_5_7b:
-
-                def _convert_messages_to_prompt(messages):
-                    chat = []
-                    for m in messages:
-                        m_type = getattr(m, "type", "human")
-                        if m_type == "system":
-                            role = "system"
-                        elif m_type == "human":
-                            role = "user"
-                        elif m_type in ("ai", "assistant"):
-                            role = "assistant"
-                        else:
-                            role = "user"
-                        chat.append({"role": role, "content": getattr(m, "content", "")})
-                    return tokenizer.apply_chat_template(
-                        chat,
-                        tokenize=False,
-                        add_generation_prompt=True,
-                    )
-
-                return ChatHuggingFace(llm=hf_llm, convert_messages_to_prompt=_convert_messages_to_prompt)
-
-            return ChatHuggingFace(llm=hf_llm)
-
-        # Hugging Face (local) path first: `init_chat_model` doesn't handle this prefix.
-        if _is_huggingface_model(self.llm_model):
-            return _create_huggingface_chat(self.llm_model)
-
-        try:
-            from langchain.chat_models.base import init_chat_model
-        except Exception as e:  # pragma: no cover
-            raise ImportError("Missing LangChain dependency for LLM initialization.") from e
-        return init_chat_model(self.llm_model, temperature=self.temperature)
+        """Create a chat model used by standalone scripts."""
+        return create_llm(self.llm_model, temperature=self.temperature)
 
     def format_prompt(self, prompt: str) -> str:
         """Hook to adapt prompts if needed. For now, keep as plain text."""
@@ -232,6 +86,162 @@ def _detect_project_root() -> Path:
         if (parent / "data").exists() or (parent / "sql_database").exists():
             return parent
     return here.parent.parent
+
+
+def _is_huggingface_model(model_name: str) -> bool:
+    return isinstance(model_name, str) and (
+        model_name.startswith("huggingface:") or model_name.startswith("hf:")
+    )
+
+
+def _create_huggingface_chat(model_name: str, *, temperature: float = 0.0):
+    """Create a ChatHuggingFace model backed by a transformers pipeline.
+
+    This mirrors the cluster setup used for:
+    - meta-llama/Llama-3.1-8B-Instruct
+    - Qwen/Qwen2.5-7B-Instruct
+    """
+    try:
+        import torch  # type: ignore
+        from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline  # type: ignore
+        from langchain_huggingface import ChatHuggingFace, HuggingFacePipeline  # type: ignore
+    except Exception as import_exc:  # pragma: no cover
+        raise ImportError(
+            "Hugging Face support requires 'transformers', 'torch', and 'langchain-huggingface'. "
+            "Install with: pip install -U transformers torch langchain-huggingface"
+        ) from import_exc
+
+    # Strip provider prefix to get the HF repo id.
+    repo_id = model_name.split(":", 1)[1] if ":" in model_name else model_name
+
+    is_llama_3_1_8b = repo_id == "meta-llama/Llama-3.1-8B-Instruct"
+    is_qwen_2_5_7b = repo_id == "Qwen/Qwen2.5-7B-Instruct"
+
+    # Ensure HF caches are writable inside the project directory.
+    try:
+        project_root = _detect_project_root()
+        hf_home = project_root / ".hf_cache"
+        transformers_cache = hf_home / "transformers"
+        hub_cache = hf_home / "hub"
+        hf_home.mkdir(parents=True, exist_ok=True)
+        transformers_cache.mkdir(parents=True, exist_ok=True)
+        hub_cache.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("HF_HOME", str(hf_home))
+        os.environ.setdefault("TRANSFORMERS_CACHE", str(transformers_cache))
+        os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hub_cache))
+    except Exception:
+        pass
+
+    # Respect an HF token from environment for gated repos.
+    try:
+        hf_token = (
+            os.environ.get("HUGGINGFACEHUB_API_TOKEN")
+            or os.environ.get("HF_TOKEN")
+            or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        )
+        if hf_token:
+            os.environ.setdefault("HF_TOKEN", hf_token)
+            os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", hf_token)
+    except Exception:
+        pass
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        repo_id,
+        use_fast=True,
+        cache_dir=os.environ.get("TRANSFORMERS_CACHE"),
+    )
+    if is_llama_3_1_8b and getattr(tokenizer, "pad_token_id", None) is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Use device_map="auto" only if accelerate is installed.
+    has_accelerate = False
+    try:
+        import accelerate  # type: ignore  # noqa: F401
+
+        has_accelerate = True
+    except Exception:
+        has_accelerate = False
+
+    try:
+        model_kwargs = {
+            "torch_dtype": torch.bfloat16 if (is_llama_3_1_8b or is_qwen_2_5_7b) else "auto",
+            "cache_dir": os.environ.get("TRANSFORMERS_CACHE"),
+        }
+        if has_accelerate:
+            model_kwargs["device_map"] = "auto"
+        model = AutoModelForCausalLM.from_pretrained(repo_id, **model_kwargs)
+    except Exception:
+        model = AutoModelForCausalLM.from_pretrained(
+            repo_id,
+            cache_dir=os.environ.get("TRANSFORMERS_CACHE"),
+        )
+
+    do_sample = bool(temperature and float(temperature) > 0.0)
+    gen_kwargs = {
+        "max_new_tokens": 16384,
+        "do_sample": do_sample,
+        "pad_token_id": getattr(tokenizer, "eos_token_id", None),
+        "return_full_text": False,
+    }
+    if do_sample:
+        gen_kwargs["temperature"] = max(0.0, float(temperature or 0.0))
+
+    gen_pipe = pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        **gen_kwargs,
+    )
+    hf_llm = HuggingFacePipeline(pipeline=gen_pipe)
+
+    # For these instruct models, apply the tokenizer chat template.
+    if is_llama_3_1_8b or is_qwen_2_5_7b:
+
+        def _convert_messages_to_prompt(messages):
+            chat = []
+            for m in messages:
+                m_type = getattr(m, "type", "human")
+                if m_type == "system":
+                    role = "system"
+                elif m_type == "human":
+                    role = "user"
+                elif m_type in ("ai", "assistant"):
+                    role = "assistant"
+                else:
+                    role = "user"
+                chat.append({"role": role, "content": getattr(m, "content", "")})
+            return tokenizer.apply_chat_template(
+                chat,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
+        return ChatHuggingFace(llm=hf_llm, convert_messages_to_prompt=_convert_messages_to_prompt)
+
+    return ChatHuggingFace(llm=hf_llm)
+
+
+def create_llm(model_name: str, *, temperature: float = 0.0):
+    """Create a chat model.
+
+    Supports common LangChain providers (OpenAI, Together, Gemini, etc.) via
+    `init_chat_model`, and additionally supports local Hugging Face models via:
+    - `huggingface:<repo_id>`
+    - `hf:<repo_id>`
+    """
+    if not model_name:
+        raise ValueError("model_name is required")
+
+    # Hugging Face (local) path first: `init_chat_model` doesn't handle this prefix.
+    if _is_huggingface_model(model_name):
+        return _create_huggingface_chat(str(model_name), temperature=float(temperature or 0.0))
+
+    try:
+        from langchain.chat_models.base import init_chat_model
+    except Exception as e:  # pragma: no cover
+        raise ImportError("Missing LangChain dependency for LLM initialization.") from e
+
+    return init_chat_model(str(model_name), temperature=float(temperature or 0.0))
 
 
 def create_embeddings(model_name: str):

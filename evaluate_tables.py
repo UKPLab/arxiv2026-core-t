@@ -7,7 +7,7 @@ You can evaluate ONE file at a time:
   - table selector output  (--mode selected)
 
 Usage:
-    python evaluate_tables.py --dataset bird --mode retrieved --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1"
+    python evaluate_tables.py --dataset bird --mode retrieved --llm-model "huggingface:Qwen/Qwen2.5-7B-Instruct" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1"
 """
 
 from __future__ import annotations

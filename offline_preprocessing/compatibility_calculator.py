@@ -13,7 +13,7 @@ Outputs:
   - (Optional) table-parameter caches under `cache/{dataset}/tables_parameters/`
 
 Usage:
-  python offline_preprocessing/compatibility_calculator.py --dataset bird --batch-size 50 --embedding-model "fireworks:WhereIsAI/UAE-Large-V1" --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo"
+  python offline_preprocessing/compatibility_calculator.py --dataset bird --embedding-model "fireworks:WhereIsAI/UAE-Large-V1" --llm-model "huggingface:Qwen/Qwen2.5-7B-Instruct"
 """
 
 import argparse

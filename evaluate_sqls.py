@@ -8,7 +8,7 @@ executed rows to the gold execution results stored in `data/{dataset}/dev_query_
 It focuses on (values-only) comparison by default.
 
 Usage:
-    python evaluate_sqls.py --dataset bird --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1"
+    python evaluate_sqls.py --dataset bird --llm-model "huggingface:Qwen/Qwen2.5-7B-Instruct" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1"
 """
 
 from __future__ import annotations

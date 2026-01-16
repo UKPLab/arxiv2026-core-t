@@ -6,7 +6,7 @@ This script takes the outputs of `sql_generator.py` and executes each SQL agains
 any evaluation/scoring; it only runs the query and records execution outcomes.
 
 Usage:
-    python sql_executor.py --dataset bird --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1"
+    python sql_executor.py --dataset bird --llm-model "huggingface:Qwen/Qwen2.5-7B-Instruct" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1"
 """
 
 from __future__ import annotations

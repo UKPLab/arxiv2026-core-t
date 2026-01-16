@@ -7,7 +7,7 @@ and a per-question list of selected tables (e.g., results/.../selected_tables.js
 then generates one SQLite SQL query per question using an LLM.
 
 Usage:
-    python sql_generator.py --dataset bird --sql-model "openai:gpt_4o_mini" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1" --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo"
+    python sql_generator.py --dataset bird --sql-model "openai:gpt_4o_mini" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1" --llm-model "huggingface:Qwen/Qwen2.5-7B-Instruct"
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ try:
 except Exception:
     pass
 
-from utils import DatabaseType, Configuration, get_results_run_dir  # noqa: E402
+from utils import DatabaseType, Configuration, create_llm, get_results_run_dir  # noqa: E402
 from utils.db_connector import get_database_schema, get_table_relationships  # noqa: E402
 from utils.prompts import get_sql_generation_prompt_lrm  # noqa: E402
 from utils.storage_manager import UnifiedStorageManager  # noqa: E402
@@ -468,12 +468,7 @@ def generate_sql_for_question(
         evidence=evidence or "",
     )
 
-    try:
-        from langchain.chat_models import init_chat_model
-    except Exception as e:
-        raise ImportError("LangChain is required to run SQL generation.") from e
-
-    model = init_chat_model(str(sql_model_name), temperature=float(temperature))
+    model = create_llm(str(sql_model_name), temperature=float(temperature))
 
     llm_usage: Dict[str, Any] = {"input_tokens": None, "output_tokens": None, "total_tokens": None}
     try:

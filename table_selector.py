@@ -7,7 +7,7 @@ LLM to choose a coherent subset of tables per query. Augmentation is enabled by 
 it applies the additive adjustment step to the selected tables.
 
 Usage:
-    python table_selector.py --dataset bird --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1" --partition 0 --num-partitions 2
+    python table_selector.py --dataset bird --llm-model "huggingface:Qwen/Qwen2.5-7B-Instruct" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1" --partition 0 --num-partitions 2
 """
 
 from __future__ import annotations

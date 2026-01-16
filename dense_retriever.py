@@ -2,37 +2,34 @@
 
 Inputs:
   - Dataset files under `data/{dataset}/`: `dev.json` (questions) and `dev_tables.json`.
-  - Enriched tables under `cache/{dataset}/metadata/enriched_tables/*.json`.
+  - Enriched tables under `cache/{dataset}/{run_tag}/metadata/enriched_tables/*.json`.
   - CLI args for dataset/model knobs (see below).
 
 Outputs:
-  - FAISS index cached at `cache/{dataset}/faiss_index/`.
+  - FAISS index cached at `cache/{dataset}/{run_tag}/faiss_index/`.
   - Per-run results at `results/{dataset}/{llm}_{embed}/results_dense_retriever/` with:
       - `{dataset}_k_{top_k}.json` (final outputs)
       - `partials/` for per-sample incremental saves
 
 Usage:
-    python offline_preprocessing/dense_retriever.py --dataset bird --top-k 10 --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1"
+    python dense_retriever.py --dataset bird --top-k 10 --llm-model "huggingface:Qwen/Qwen2.5-7B-Instruct" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1"
 """
 
 import os
 
 # macOS: prevent abort caused by multiple OpenMP runtimes (e.g., faiss + torch/sklearn).
-# This is a pragmatic runtime workaround; the "clean" fix is ensuring only one OpenMP
-# runtime is linked across all native deps.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
 import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-from tqdm import tqdm
 from dotenv import load_dotenv
-
 import faiss
+from tqdm import tqdm
 
 TABLE_KEY_SEP = "#sep#"
 EMBED_BATCH_SIZE = 64
@@ -53,7 +50,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-from utils import DatabaseType, create_embeddings, create_reranker, make_run_tag
+from utils import DatabaseType, create_embeddings, create_reranker, make_run_tag  # noqa: E402
 
 
 def _require_faiss() -> None:
@@ -126,9 +123,7 @@ def _load_enriched_tables_map(enriched_dir: Path) -> Dict[str, Dict[str, Any]]:
     return mapping
 
 
-def _build_table_corpus(
-    dev_tables: Dict[str, Dict[str, Any]], enriched_map: Dict[str, Dict[str, Any]]
-) -> Tuple[List[str], List[str]]:
+def _build_table_corpus(dev_tables: Dict[str, Dict[str, Any]], enriched_map: Dict[str, Dict[str, Any]]) -> Tuple[List[str], List[str]]:
     texts: List[str] = []
     keys: List[str] = []
     misses = 0
@@ -148,7 +143,11 @@ def _build_table_corpus(
             misses += 1
             continue
 
-        text = _format_table_text(table_name=table_name, table_purpose=table_purpose, table_markdown_content=table_markdown_content)
+        text = _format_table_text(
+            table_name=table_name,
+            table_purpose=table_purpose,
+            table_markdown_content=table_markdown_content,
+        )
         texts.append(text)
         keys.append(table_key)
 
@@ -173,6 +172,7 @@ def _get_index_paths(project_root: Path, dataset: str, run_tag: str, embedding_m
 
 
 def _load_or_build_index(
+    *,
     table_texts: List[str],
     table_keys: List[str],
     embedding_model: str,
@@ -229,9 +229,7 @@ def _load_or_build_index(
 
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parse CLI arguments for dense retrieval."""
-    parser = argparse.ArgumentParser(
-        description="Build or reuse a FAISS index and retrieve top tables for each question."
-    )
+    parser = argparse.ArgumentParser(description="Build or reuse a FAISS index and retrieve top tables for each question.")
     parser.add_argument(
         "--dataset",
         dest="dataset",
@@ -316,7 +314,12 @@ def _partial_path(partials_dir: Path, dataset: str, top_k: int, sample_idx: int,
 
 
 def _faiss_candidates(
-    *, index: "faiss.Index", query_vec: np.ndarray, k: int, table_keys: List[str], table_texts: List[str]
+    *,
+    index: "faiss.Index",
+    query_vec: np.ndarray,
+    k: int,
+    table_keys: List[str],
+    table_texts: List[str],
 ) -> Tuple[List[str], List[str], List[float]]:
     scores, indices = index.search(query_vec.reshape(1, -1), k)
     scores_list = scores[0].tolist()
@@ -543,3 +546,4 @@ if __name__ == "__main__":
     args = _parse_args()
     run_dense_retrieval(args)
     sys.exit(0)
+

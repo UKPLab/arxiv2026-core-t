@@ -11,7 +11,7 @@ Outputs:
   - Cached metadata under `cache/{dataset}/metadata/`
 
 Usage:
-  python offline_preprocessing/metadata_generator.py --dataset bird --batch-size 20 --llm-model "together:Qwen/Qwen2.5-7B-Instruct-Turbo"
+  python offline_preprocessing/metadata_generator.py --dataset bird --embedding-model "fireworks:WhereIsAI/UAE-Large-V1" --llm-model "huggingface:Qwen/Qwen2.5-7B-Instruct"
 """
 
 import argparse

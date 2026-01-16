@@ -5,6 +5,7 @@ from .utils import (
     Configuration,
     get_results_run_dir,
     make_run_tag,
+    create_llm,
     create_embeddings,
     create_reranker,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "Configuration",
     "make_run_tag",
     "get_results_run_dir",
+    "create_llm",
     "create_embeddings",
     "create_reranker",
     "MetadataCache",
