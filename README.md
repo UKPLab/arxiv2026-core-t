@@ -4,7 +4,7 @@
 
 ## CORE-T: COherent REtrieval of Tables for Text-to-SQL
 
-[![Arxiv](https://img.shields.io/badge/Arxiv-TBC.-red?style=flat-square&logo=arxiv&logoColor=white)](TBD.)
+[![Arxiv](https://img.shields.io/badge/Arxiv-2601.13111-red?style=flat-square&logo=arxiv&logoColor=white)](https://www.arxiv.org/abs/2601.13111)
 [![License](https://img.shields.io/badge/License-Apache--2.0-green?style=flat-square)](https://opensource.org/licenses/Apache-2.0)
 [![Python Versions](https://img.shields.io/badge/Python-3.12-blue.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 
@@ -12,7 +12,7 @@
   <img src="assets/assumption.png" style="width:50%">
 <p align="center">
 
-Realistic text-to-SQL workloads often require joining multiple tables. As a result, accurately retrieving the relevant set of tables becomes a key bottleneck for end-to-end performance. We study an open-book setting where queries must be answered over large, heterogeneous table collections pooled from many sources, without clean scoping signals such as database identifiers. Here, dense retrieval (DR) achieves high recall but returns many distractors, while join-aware alternatives often rely on extra assumptions and/or incur high inference overhead. We propose CORE-T, a scalable, training-free framework that enriches tables with LLM-generated purpose metadata and pre-computes a lightweight table-compatibility cache. At inference time, DR returns top-K candidates; a single LLM call selects a coherent, joinable subset, and a simple additive adjustment step restores strongly compatible tables. Across BIRD, SPIDER, and MMQA, CORE-T improves table-selection F1 by up to 22.7 points while retrieving up to 42% fewer tables, improving multi-table execution accuracy by up to 5.0 points on BIRD and 6.9 points on MMQA, and using 4–5× fewer tokens than LLM-intensive baselines.
+Realistic text-to-SQL workflows often require joining multiple tables. As a result, accurately retrieving the relevant set of tables becomes a key bottleneck for end-to-end performance. We study an open-book setting where queries must be answered over large, heterogeneous table collections pooled from many sources, without clean scoping signals such as database identifiers. Here, dense retrieval (DR) achieves high recall but returns many distractors, while join-aware alternatives often rely on extra assumptions and/or incur high inference overhead. We propose CORE-T, a scalable, training-free framework that enriches tables with LLM-generated purpose metadata and pre-computes a lightweight table-compatibility cache. At inference time, DR returns top-K candidates; a single LLM call selects a coherent, joinable subset, and a simple additive adjustment step restores strongly compatible tables. Across BIRD, SPIDER, and MMQA, CORE-T improves table-selection F1 by up to 22.7 points while retrieving up to 42% fewer tables, improving multi-table execution accuracy by up to 5.0 points on BIRD and 6.9 points on MMQA, and using 4–5× fewer tokens than LLM-intensive baselines.
 
 <p align="center">
   <img src="assets/pipeline.png" style="width:50%">
@@ -390,10 +390,10 @@ Please use the following citation for the CORE-T paper:
     title       = {CORE-T: COherent REtrieval of Tables for Text-to-SQL}, 
     author      = {Hassan Soliman and Vivek Gupta and Dan Roth and Iryna Gurevych},
     year        = {2026},
-    eprint      = {},
+    eprint      = {2601.13111},
     archivePrefix={arXiv},
     primaryClass={cs.CL},
-    url         = {https://arxiv.org/abs/}, 
+    url         = {https://www.arxiv.org/abs/2601.13111}, 
 }
 ```
 
