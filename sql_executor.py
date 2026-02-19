@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -55,6 +56,35 @@ def _write_json(path: Path, payload: Any, *, indent: int = 2) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=indent, ensure_ascii=False)
+
+
+def _sanitize_sql_for_execution(raw_sql: Optional[str]) -> Optional[str]:
+    """
+    Best-effort cleanup for cached/LLM SQL strings before handing them to SQLite.
+
+    This strips common Markdown code fences and <think> blocks that frequently
+    appear in cached entries from older runs.
+    """
+    if raw_sql is None:
+        return None
+    text = str(raw_sql).strip()
+    if not text:
+        return None
+    # Remove <think> blocks (some models emit them).
+    try:
+        text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+    except Exception:
+        pass
+    # Strip Markdown fences.
+    if text.startswith("```sqlite"):
+        text = text[len("```sqlite") :].strip()
+    if text.startswith("```sql"):
+        text = text[len("```sql") :].strip()
+    if text.startswith("```"):
+        text = text[len("```") :].strip()
+    if text.endswith("```"):
+        text = text[: -len("```")].strip()
+    return text or None
 
 
 def _extract_tables_for_execution(details: Dict[str, Any]) -> Tuple[List[str], str]:
@@ -120,6 +150,15 @@ def _execute_one(
 
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Execute generated SQLs (no evaluation).")
+    p.add_argument(
+        "--sql-generation-dir",
+        type=str,
+        default=None,
+        help=(
+            "Path to a results_sql_generation* folder containing sqls.json/sqls_details.json. "
+            "If provided, this overrides default results path resolution."
+        ),
+    )
     p.add_argument(
         "--sqls",
         type=str,
@@ -192,13 +231,16 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def main(args: argparse.Namespace) -> int:
-    gen_dir = get_results_run_dir(
-        dataset=str(args.dataset),
-        step_dirname="results_sql_generation",
-        llm_model=str(args.llm_model),
-        embedding_model=str(args.embedding_model),
-        project_root=PROJECT_ROOT,
-    )
+    if args.sql_generation_dir:
+        gen_dir = Path(args.sql_generation_dir).expanduser().resolve()
+    else:
+        gen_dir = get_results_run_dir(
+            dataset=str(args.dataset),
+            step_dirname="results_sql_generation",
+            llm_model=str(args.llm_model),
+            embedding_model=str(args.embedding_model),
+            project_root=PROJECT_ROOT,
+        )
     sqls_path = Path(args.sqls).expanduser().resolve() if args.sqls else (gen_dir / "sqls.json").resolve()
     details_path = Path(args.sqls_details).expanduser().resolve() if args.sqls_details else (gen_dir / "sqls_details.json").resolve()
     if not sqls_path.exists():
@@ -259,6 +301,7 @@ def main(args: argparse.Namespace) -> int:
         sql = sqls[i] if i < len(sqls) else None
         if not sql and isinstance(d.get("sql"), str):
             sql = str(d.get("sql"))
+        sql = _sanitize_sql_for_execution(sql)
 
         if sql and bool(args.optimize_sql):
             try:

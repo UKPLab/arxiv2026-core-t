@@ -7,7 +7,7 @@ and a per-question list of selected tables (e.g., results/.../selected_tables.js
 then generates one SQLite SQL query per question using an LLM.
 
 Usage:
-    python sql_generator.py --dataset bird --sql-model "openai:gpt_4o_mini" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1" --llm-model "huggingface:Qwen/Qwen2.5-7B-Instruct"
+    python sql_generator.py --dataset bird --sql-model "openai:gpt-4o-mini" --embedding-model "fireworks:WhereIsAI/UAE-Large-V1" --llm-model "huggingface:Qwen/Qwen2.5-7B-Instruct"
 """
 
 from __future__ import annotations
@@ -442,13 +442,14 @@ def generate_sql_for_question(
         cached = None
 
     if cached and isinstance(cached, dict) and cached.get("sql"):
+        cached_sql = _sanitize_generated_sql(str(cached.get("sql") or ""))
         sql_tables, sql_tables_full_ids = _extract_sql_tables(
-            str(cached.get("sql") or ""),
+            cached_sql,
             known_aliases=alias_to_full_id,
             fallback_full_ids=resolved_full_ids,
         )
         return {
-            "sql": cached.get("sql"),
+            "sql": cached_sql,
             "error": cached.get("error"),
             "tables": list(cached.get("tables") or selected_tables),
             "resolved_tables": resolved_full_ids,

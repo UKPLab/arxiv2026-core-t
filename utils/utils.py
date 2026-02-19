@@ -232,16 +232,61 @@ def create_llm(model_name: str, *, temperature: float = 0.0):
     if not model_name:
         raise ValueError("model_name is required")
 
+    model_str = str(model_name).strip()
+    temp = float(temperature or 0.0)
+
     # Hugging Face (local) path first: `init_chat_model` doesn't handle this prefix.
     if _is_huggingface_model(model_name):
-        return _create_huggingface_chat(str(model_name), temperature=float(temperature or 0.0))
+        return _create_huggingface_chat(model_str, temperature=temp)
+
+    # DeepInfra is not (always) registered as an `init_chat_model` provider. Use the
+    # community integration directly.
+    if model_str.lower().startswith("deepinfra:"):
+        raw_model = model_str.split(":", 1)[1].strip()
+        if not raw_model:
+            raise ValueError("DeepInfra model is required, e.g. deepinfra:google/gemma-3-4b-it")
+        try:
+            from langchain_community.chat_models import ChatDeepInfra  # type: ignore
+        except Exception as import_exc:  # pragma: no cover
+            raise ImportError(
+                "DeepInfra chat support requires langchain-community to be installed."
+            ) from import_exc
+
+        api_token = (
+            os.environ.get("DEEPINFRA_API_TOKEN")
+            or os.environ.get("DEEPINFRA_API_KEY")
+            or os.environ.get("DEEPINFRA_TOKEN")
+        )
+        # ChatDeepInfra can still pick up env vars internally; we pass it if present.
+        return ChatDeepInfra(
+            model=raw_model,
+            temperature=temp,
+            max_tokens=16384,
+            deepinfra_api_token=api_token,
+        )
 
     try:
         from langchain.chat_models.base import init_chat_model
     except Exception as e:  # pragma: no cover
         raise ImportError("Missing LangChain dependency for LLM initialization.") from e
 
-    return init_chat_model(str(model_name), temperature=float(temperature or 0.0))
+    if ":" in model_str:
+        provider, raw_model = (s.strip() for s in model_str.split(":", 1))
+        if provider and raw_model:
+            try:
+                return init_chat_model(raw_model, model_provider=provider, temperature=temp)
+            except TypeError:
+                # Older/newer LangChain variants or wrappers; fall back.
+                pass
+            except Exception as first_exc:
+                # Preserve backward compatibility: if the original `provider:model`
+                # string happens to work for this provider in this environment, use it.
+                try:
+                    return init_chat_model(model_str, temperature=temp)
+                except Exception:
+                    raise first_exc
+
+    return init_chat_model(model_str, temperature=temp)
 
 
 def create_embeddings(model_name: str):

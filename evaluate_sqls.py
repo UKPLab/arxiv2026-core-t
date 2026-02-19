@@ -148,6 +148,36 @@ def _truncate_rows(rows: Any, max_rows: int) -> Any:
     return rows[: int(max_rows)]
 
 
+def _maybe_truncate_for_compare(
+    pred_rows: Any,
+    gold_rows: Any,
+    *,
+    max_gold_result_rows: int,
+    truncated_gold_result_rows: int,
+) -> Tuple[Any, Any, bool]:
+    """
+    Best-effort alignment for huge gold result sets.
+
+    If gold has more than `max_gold_result_rows` rows, we truncate BOTH gold and
+    pred to `truncated_gold_result_rows` before comparison. This mirrors the
+    MAJOR-T evaluation settings where extremely large result sets are compared
+    on a smaller prefix for stability/performance.
+    """
+    if not isinstance(pred_rows, list) or not isinstance(gold_rows, list):
+        return pred_rows, gold_rows, False
+    try:
+        max_rows = int(max_gold_result_rows)
+        trunc_rows = int(truncated_gold_result_rows)
+    except Exception:
+        return pred_rows, gold_rows, False
+    if max_rows < 0 or trunc_rows < 0:
+        return pred_rows, gold_rows, False
+    if len(gold_rows) <= max_rows:
+        return pred_rows, gold_rows, False
+    k = max(0, trunc_rows)
+    return pred_rows[:k], gold_rows[:k], True
+
+
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Evaluate executed SQL rows vs gold execution results (values-only by default).")
     p.add_argument(
@@ -171,6 +201,15 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=str,
         default="fireworks:WhereIsAI/UAE-Large-V1",
         help="Embedding model tag used for results run folder naming.",
+    )
+    p.add_argument(
+        "--sql-generation-dir",
+        type=str,
+        default=None,
+        help=(
+            "Path to a results_sql_generation* folder containing sqls_exec_details.json. "
+            "If provided, this overrides default results path resolution."
+        ),
     )
     p.add_argument(
         "--exec-details",
@@ -218,6 +257,21 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=int,
         default=50,
         help="Max rows to store for pred/gold in --out-details (default: 50). Use -1 for all.",
+    )
+    p.add_argument(
+        "--max-gold-result-rows",
+        type=int,
+        default=300000,
+        help=(
+            "If a gold result has more than this many rows, compare on a smaller prefix "
+            "(see --truncated-gold-result-rows). Default: 300000. Use -1 to disable."
+        ),
+    )
+    p.add_argument(
+        "--truncated-gold-result-rows",
+        type=int,
+        default=300000,
+        help="Prefix length used for comparison when gold results are huge (default: 30000). Use -1 to disable.",
     )
     p.add_argument(
         "--out",
@@ -285,22 +339,27 @@ def _init_counts() -> Dict[str, int]:
 def _counts_to_metrics(counts: Dict[str, int]) -> Dict[str, float]:
     denom_all = max(1, int(counts.get("total", 0)))
     denom_executed_ok = max(1, int(counts.get("executed_ok", 0)))
+    denom_evaluated = max(1, int(counts.get("evaluated", 0)))
     return {
         "exact_match_rate_all": float(counts.get("exact_match", 0)) / denom_all,
         "execution_success_rate": float(counts.get("executed_ok", 0)) / denom_all,
         "exact_match_rate_executed_ok": float(counts.get("exact_match", 0)) / denom_executed_ok,
+        "exact_match_rate_evaluated": float(counts.get("exact_match", 0)) / denom_evaluated,
     }
 
 
 def main(args: argparse.Namespace) -> int:
     dataset = str(args.dataset or "bird").strip()
-    gen_dir = get_results_run_dir(
-        dataset=str(dataset),
-        step_dirname="results_sql_generation",
-        llm_model=str(args.llm_model),
-        embedding_model=str(args.embedding_model),
-        project_root=PROJECT_ROOT,
-    )
+    if args.sql_generation_dir:
+        gen_dir = Path(args.sql_generation_dir).expanduser().resolve()
+    else:
+        gen_dir = get_results_run_dir(
+            dataset=str(dataset),
+            step_dirname="results_sql_generation",
+            llm_model=str(args.llm_model),
+            embedding_model=str(args.embedding_model),
+            project_root=PROJECT_ROOT,
+        )
     exec_details_path = (
         Path(args.exec_details).expanduser().resolve()
         if args.exec_details
@@ -415,9 +474,15 @@ def main(args: argparse.Namespace) -> int:
         if executed_ok and has_rows and gold_ok and gold_is_evaluable:
             for ck in case_keys:
                 counts_by_case[ck]["evaluated"] += 1
-            exact_match = compare_query_results(
+            pred_cmp, gold_cmp, gold_truncated_for_compare = _maybe_truncate_for_compare(
                 pred_rows,
                 gold,
+                max_gold_result_rows=int(args.max_gold_result_rows),
+                truncated_gold_result_rows=int(args.truncated_gold_result_rows),
+            )
+            exact_match = compare_query_results(
+                pred_cmp,
+                gold_cmp,
                 values_only=values_only,
                 float_tolerance=float_tol,
             )
@@ -442,6 +507,7 @@ def main(args: argparse.Namespace) -> int:
             "values_only": bool(values_only),
             "float_tolerance": float_tol,
             "exact_match": bool(exact_match),
+            "gold_truncated_for_compare": bool(gold_truncated_for_compare) if (executed_ok and has_rows and gold_ok and gold_is_evaluable) else False,
         }
         per_question_summary.append(summary)
 

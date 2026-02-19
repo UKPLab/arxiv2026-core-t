@@ -74,9 +74,34 @@ class SQLGenerationCache:
         known modes produced by the pipeline.
         """
         base = self._get_cache_key(query, tables, config, llm_model_override=llm_model_override)
-        # Observed in existing cache files: "__MODE_combined"
-        # Also used by older defaults: "__MODE_batch"
-        return [f"{base}__MODE_combined", f"{base}__MODE_batch"]
+        # Observed legacy variants in older cache files:
+        # - Suffix at the end:  <base>__MODE_combined
+        # - Inserted before Q:  ...___SQL_<tables>__MODE_combined__Q<hash>
+        #
+        # We try both shapes (and the older "__MODE_batch") without scanning all keys.
+        keys = [
+            f"{base}__MODE_combined",
+            f"{base}__MODE_batch",
+        ]
+
+        # If an older writer placed MODE before the query hash, the base contains "__Q<hash>".
+        if "__Q" in base:
+            keys.extend(
+                [
+                    base.replace("__Q", "__MODE_combined__Q", 1),
+                    base.replace("__Q", "__MODE_batch__Q", 1),
+                ]
+            )
+
+        # De-dupe while preserving order.
+        seen: set[str] = set()
+        out: List[str] = []
+        for k in keys:
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(k)
+        return out
 
     def _load_cache(self) -> None:
         if not self.cache_file.exists():
